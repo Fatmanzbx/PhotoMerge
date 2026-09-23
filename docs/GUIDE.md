@@ -12,7 +12,7 @@ Sonoma or newer. About 20 MB of disk for the app; a clean library needs as much 
 space as the photos you keep.
 
 1. Download `PhotoMerge-<version>.dmg` from the
-   [latest release](../../releases/latest).
+   [latest release](https://github.com/Fatmanzbx/PhotoMerge/releases/latest).
 2. Open the `.dmg` and drag **PhotoMerge** into **Applications**.
 3. The first time, **right-click PhotoMerge → Open**, then click **Open** in the
    dialog. macOS shows this warning because the app is not signed with a paid Apple

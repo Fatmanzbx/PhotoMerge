@@ -29,7 +29,7 @@ the files you give it, and every choice it makes — or you make — can be undo
 
 ## Download and install
 
-Get `PhotoMerge-<version>.dmg` from the **[latest release](../../releases/latest)**, open
+Get `PhotoMerge-<version>.dmg` from the **[latest release](https://github.com/Fatmanzbx/PhotoMerge/releases/latest)**, open
 it and drag PhotoMerge into Applications. The first time, right-click the app and choose
 **Open** (it is not signed with a paid Apple certificate). macOS 14 or newer, Apple silicon
 or Intel.
