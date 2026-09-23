@@ -1,0 +1,24 @@
+[project]
+name = "photomerge"
+version = "0.1.0.dev0"
+description = "Merge N heterogeneous photo sources into one library, keeping the best pixels and the union of the metadata."
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "pillow>=10.0",
+    "pillow-heif>=0.16",
+    "opencv-python>=4.9",
+]
+
+[project.optional-dependencies]
+resolve = ["timezonefinder>=6.5"]
+
+[project.scripts]
+photomerge = "photomerge.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["photomerge*"]

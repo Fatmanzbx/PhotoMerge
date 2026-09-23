@@ -1,0 +1,25 @@
+# macOS
+.DS_Store
+
+# the app's build output (./app/build.sh recreates it)
+app/build/
+app/dist/
+app/Tools/wid
+
+# Python
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.venv/
+
+# Your photos' data never belongs in the repository: catalogs, reports, exports
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+manifest.json
+photomerge_report*.csv
+report.html
+out/
+review/
+RESULT/
+Takeout/
