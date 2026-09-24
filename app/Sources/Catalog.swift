@@ -36,7 +36,7 @@ final class Catalog {
             added_at REAL NOT NULL, priority INTEGER NOT NULL DEFAULT 0, exclude TEXT);
 
         CREATE TABLE IF NOT EXISTS file(
-            id INTEGER PRIMARY KEY,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             source_id INTEGER NOT NULL REFERENCES source(id) ON DELETE CASCADE,
             path TEXT NOT NULL UNIQUE, rel_path TEXT NOT NULL,
             size INTEGER NOT NULL, mtime REAL NOT NULL,
@@ -144,6 +144,9 @@ final class Catalog {
             "ALTER TABLE source ADD COLUMN exclude TEXT;",
             "ALTER TABLE file ADD COLUMN motion TEXT;",
             "ALTER TABLE manual_fact ADD COLUMN confirmed INTEGER NOT NULL DEFAULT 0;",
+            "ALTER TABLE source ADD COLUMN unrecognised INTEGER NOT NULL DEFAULT 0;",
+            "ALTER TABLE source ADD COLUMN unrecognised_kinds TEXT;",
+            "ALTER TABLE zone_fix ADD COLUMN keep_clock INTEGER NOT NULL DEFAULT 0;",
             "CREATE INDEX IF NOT EXISTS file_content ON file(content_id);",
             """
             CREATE TABLE IF NOT EXISTS zone_pick(
@@ -174,14 +177,6 @@ final class Catalog {
                 decided_at REAL NOT NULL, PRIMARY KEY(sha_a, sha_b));
             """,
         ] { try? run(sql) }
-    }
-
-    /// True when the schema has the column — lets callers degrade instead of crashing.
-    func hasColumn(_ table: String, _ column: String) -> Bool {
-        guard let st = try? prepare("PRAGMA table_info(\(table));") else { return false }
-        defer { st.finalize() }
-        while st.step() { if st.text(1) == column { return true } }
-        return false
     }
 
     // MARK: primitives
@@ -253,34 +248,43 @@ struct Snapshot {
     fileprivate var rows: [String: [String]] = [:]     // table -> INSERT statements
     fileprivate var excludes: [String] = []             // UPDATE statements for source.exclude
 
-    static func take(_ c: Catalog) -> Snapshot {
+    /// Settings that describe where a copy was written, not a choice about the photos:
+    /// undoing a choice made earlier must not point the manifest at another folder
+    /// (review finding 12).
+    static let untouchedSettings = ["output_root", "act_options"]
+
+    /// Throws rather than returning a partial snapshot: applying one would empty a
+    /// table it failed to read (review finding 30).
+    static func take(_ c: Catalog) throws -> Snapshot {
         var snap = Snapshot()
         for t in tables {
             var cols: [String] = []
-            if let st = try? c.prepare("PRAGMA table_info(\(t));") {
-                while st.step() { if let n = st.text(1) { cols.append(n) } }
-                st.finalize()
-            }
+            let info = try c.prepare("PRAGMA table_info(\(t));")
+            while info.step() { if let n = info.text(1) { cols.append(n) } }
+            info.finalize()
             guard !cols.isEmpty else { continue }
             let values = cols.map { "quote(\($0))" }.joined(separator: " || ',' || ")
+            let filter = t == "setting" ? " WHERE key NOT IN (\(untouchedSettings.map { "'\($0)'" }.joined(separator: ",")))" : ""
             var ins: [String] = []
-            if let st = try? c.prepare("SELECT 'INSERT INTO \(t)(\(cols.joined(separator: ","))) VALUES(' || \(values) || ');' FROM \(t);") {
-                while st.step() { if let q = st.text(0) { ins.append(q) } }
-                st.finalize()
-            }
+            let st = try c.prepare("SELECT 'INSERT INTO \(t)(\(cols.joined(separator: ","))) VALUES(' || \(values) || ');' FROM \(t)\(filter);")
+            while st.step() { if let q = st.text(0) { ins.append(q) } }
+            st.finalize()
             snap.rows[t] = ins
         }
-        if let st = try? c.prepare("SELECT 'UPDATE source SET exclude = ' || quote(exclude) || ' WHERE id = ' || id || ';' FROM source;") {
-            while st.step() { if let q = st.text(0) { snap.excludes.append(q) } }
-            st.finalize()
-        }
+        let ex = try c.prepare("SELECT 'UPDATE source SET exclude = ' || quote(exclude) || ' WHERE id = ' || id || ';' FROM source;")
+        while ex.step() { if let q = ex.text(0) { snap.excludes.append(q) } }
+        ex.finalize()
         return snap
     }
 
     func apply(_ c: Catalog) {
         try? c.transaction {
             for (t, ins) in rows {
-                try c.run("DELETE FROM \(t);")
+                if t == "setting" {
+                    try c.run("DELETE FROM setting WHERE key NOT IN (\(Snapshot.untouchedSettings.map { "'\($0)'" }.joined(separator: ",")));")
+                } else {
+                    try c.run("DELETE FROM \(t);")
+                }
                 for q in ins { try c.run(q) }
             }
             for q in excludes { try c.run(q) }

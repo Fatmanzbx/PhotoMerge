@@ -46,6 +46,27 @@ enum Resolver {
                           "Pixel filename (UTC)": 2, "epoch filename (UTC)": 3]
 
     /// Evidence read off the files, as opposed to worked out from other photos.
+    /// A time that is only a file's copy date, or nothing: it says when a file was
+    /// copied, not when a photograph was taken, so nothing may be inferred from it —
+    /// not the day's place, not a neighbour's zone (review finding 2).
+    static func unreliableTime(_ s: String) -> Bool { s == "none" || s.hasPrefix("mtime") }
+
+    /// A zone a person set on one photograph, and which of its two readings to keep.
+    struct Fix: Equatable { let offset: String; var keepClock = false }
+
+    /// The centre of some fixes, on the sphere: an arithmetic mean of longitudes
+    /// puts a day spent either side of 180° in the wrong hemisphere (review finding 31).
+    static func sphericalCentre(_ pts: [(Double, Double)]) -> (Double, Double) {
+        var x = 0.0, y = 0.0, z = 0.0
+        for (la, lo) in pts {
+            let p = la * .pi / 180, l = lo * .pi / 180
+            x += cos(p) * cos(l); y += cos(p) * sin(l); z += sin(p)
+        }
+        let n = Double(pts.count)
+        return (atan2(z / n, ((x / n) * (x / n) + (y / n) * (y / n)).squareRoot()) * 180 / .pi,
+                atan2(y / n, x / n) * 180 / .pi)
+    }
+
     static func readZone(_ s: String) -> Bool { s == "tag" || s.hasPrefix("clock + ") || s == "you corrected it" }
     static func readPlace(_ s: String) -> Bool { s == "measured" || s == "sidecar GPS" }
 
@@ -240,7 +261,7 @@ enum Resolver {
     /// kept and the wall clock follows: the file's clock was right about *when*,
     /// wrong about *where on the globe that was* (Audit).
     static func resolve(_ inputs: [Input], picks: [Int: String] = [:],
-                        params: Params = Params(), fixes: [Int: String] = [:],
+                        params: Params = Params(), fixes: [Int: Fix] = [:],
                         rules: [PlaceRule] = [],
                         manual: [Int: Manual.Entry] = [:]) -> (out: [Resolved], stats: Stats) {
         var stats = Stats()
@@ -291,7 +312,7 @@ enum Resolver {
                 pendingUTC[out.count] = (u, src)
             } else if let m = input.claims.map(\.mtime).filter({ $0 > 0 }).min() {
                 // last resort, and marked as such so the UI can say so
-                r.localTime = wallClock(m, offset: 0)
+                r.localTime = wallClock(m, offset: Double(TimeZone.current.secondsFromGMT(for: Date(timeIntervalSince1970: m))))
                 r.timeSource = "mtime (unreliable)"
                 stats.timeFromMtime += 1
             }
@@ -383,18 +404,25 @@ enum Resolver {
             }
         }
 
-        // ---- 1c. what you corrected: same instant, the right offset
+        // ---- 1c. what you corrected: the right offset, keeping either the instant
+        // (the default: the moment was right, the clock shown was not) or the clock
+        // (the camera showed local time; only the stamped zone was wrong).
         if !fixes.isEmpty {
             for i in out.indices {
-                guard let o = fixes[out[i].clusterID] else { continue }
-                let instant = out[i].instant ?? epoch(out[i].localTime, out[i].utcOffset)
-                if let instant {
-                    out[i].localTime = wallClock(instant, offset: offsetSeconds(o))
-                    out[i].instant = instant
-                    utcOnly.remove(i)
-                    if out[i].timeSource.hasSuffix(", shown in UTC") {
-                        out[i].timeSource = String(out[i].timeSource.dropLast(", shown in UTC".count))
+                guard let fx = fixes[out[i].clusterID] else { continue }
+                let o = fx.offset
+                if fx.keepClock {
+                    if out[i].localTime != nil { out[i].instant = epoch(out[i].localTime, o) }
+                } else {
+                    let instant = out[i].instant ?? epoch(out[i].localTime, out[i].utcOffset)
+                    if let instant {
+                        out[i].localTime = wallClock(instant, offset: offsetSeconds(o))
+                        out[i].instant = instant
                     }
+                }
+                utcOnly.remove(i)
+                if out[i].timeSource.hasSuffix(", shown in UTC") {
+                    out[i].timeSource = String(out[i].timeSource.dropLast(", shown in UTC".count))
                 }
                 out[i].utcOffset = o
                 out[i].zoneSource = "you corrected it"
@@ -425,12 +453,11 @@ enum Resolver {
         // a day whose fixes cluster tightly was spent in one place
         var dayCentre: [Int: (Double, Double)] = [:]
         for (day, fixes) in fixesByDay where fixes.count > 0 {
-            let la = fixes.map(\.lat).reduce(0, +) / Double(fixes.count)
-            let lo = fixes.map(\.lon).reduce(0, +) / Double(fixes.count)
+            let (la, lo) = sphericalCentre(fixes.map { ($0.lat, $0.lon) })
             let spread = fixes.map { haversineKM($0.lat, $0.lon, la, lo) }.max() ?? 0
             if spread <= params.dayRadiusKM { dayCentre[day] = (la, lo) }
         }
-        for i in out.indices where out[i].placeSource == "none" && !utcOnly.contains(i) {
+        for i in out.indices where out[i].placeSource == "none" && !utcOnly.contains(i) && !unreliableTime(out[i].timeSource) {
             guard let day = dayNumber(out[i].localTime) else { continue }
             if let c = dayCentre[day] {
                 out[i].lat = c.0; out[i].lon = c.1
@@ -467,8 +494,7 @@ enum Resolver {
             }
             var centre: [String: (Double, Double)] = [:]
             for (a, fx) in fixes where fx.count >= 3 {
-                let la = fx.map(\.0).reduce(0, +) / Double(fx.count)
-                let lo = fx.map(\.1).reduce(0, +) / Double(fx.count)
+                let (la, lo) = sphericalCentre(fx)
                 let spread = fx.map { haversineKM($0.0, $0.1, la, lo) }.max() ?? 0
                 if spread <= params.dayRadiusKM { centre[a] = (la, lo) } else { stats.declinedFolderSpansTooFar += 1 }
             }
@@ -547,7 +573,7 @@ enum Resolver {
             }
             .sorted { $0.1 < $1.1 }
         if !known.isEmpty {
-            for i in out.indices where out[i].zoneSource == "none" && !utcOnly.contains(i) {
+            for i in out.indices where out[i].zoneSource == "none" && !utcOnly.contains(i) && !unreliableTime(out[i].timeSource) {
                 guard let d = dayNumber(out[i].localTime) else { continue }
                 var best: (gap: Int, off: String)? = nil
                 for k in known {

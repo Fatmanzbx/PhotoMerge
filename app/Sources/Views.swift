@@ -132,6 +132,10 @@ struct SourceCard: View {
                                 fact("\(info.unreadable)", "could not be opened", D.attention)
                                     .help("Permissions, or a file that vanished while being read. It is tried again if it changes.")
                             }
+                            if info.unrecognised > 0 {
+                                fact(info.unrecognised.formatted(), "not photos or videos the app reads", D.attention)
+                                    .help("Left out: \(info.unrecognisedKinds). PhotoMerge reads JPEG, PNG, GIF, WebP, HEIC/AVIF, TIFF and TIFF-based RAW, and MP4/MOV video. AVI, MKV, WMV and other formats are not included in a clean library.")
+                            }
                         }
                         .padding(.top, 2)
                     }
@@ -145,6 +149,7 @@ struct SourceCard: View {
                 Button { if info.files > 0 { confirmRemove = true } else { engine.removeSource(info.id) } } label: {
                     Image(systemName: "minus.circle")
                 }
+                    .accessibilityLabel("Forget this source")
                     .buttonStyle(.borderless)
                     .help("Forget this source. The folder is not touched.")
                     .disabled(engine.progress.running)
@@ -216,7 +221,8 @@ struct GroupsView: View {
         } else {
             VStack(spacing: 0) {
                 if !engine.reviewPairs.isEmpty {
-                    Segments(selection: $mode, items: [(Mode.groups, "Groups  \(engine.groups.count)"),
+                    Segments(selection: $mode, items: [(Mode.groups, engine.groupsTotal > engine.groups.count
+                                                            ? "Groups  \(engine.groups.count) of \(engine.groupsTotal.formatted())" : "Groups  \(engine.groups.count)"),
                                                        (Mode.review, undecided > 0 ? "Edited copies  \(undecided)" : "Edited copies ✓")])
                     .padding(.vertical, D.Space.s)
                     Divider()
@@ -804,7 +810,7 @@ struct ChecksSection: View {
                 }
             }
             if !engine.audit.isEmpty {
-                Text("These photographs record a timezone that cannot be right: another photograph taken at the same place within half an hour, or every photograph taken there that month, says otherwise. The moment each was taken is not in doubt — only the offset, and so the clock shown. Correcting keeps the moment and fixes the clock. Your files are not changed; a merged copy carries the correction.")
+                Text("These photographs record a time zone that cannot be right: the clocks where they were taken showed another, or the photographs around them say otherwise. Two things could be wrong, and only you know which. **Correct** treats the moment as right and moves the clock shown — for a photo whose time was converted under the wrong zone. **Keep the clock** treats the clock as right and moves the moment — for a camera that showed local time while the import stamped its home zone; the times you see stay as they are. Look at a few before pressing either for a whole group. Your files are not changed; a clean library carries the correction.")
                     .font(.system(size: 15)).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -816,9 +822,13 @@ struct ChecksSection: View {
                             Text("\(g.rows.count) photograph\(g.rows.count == 1 ? "" : "s")")
                                 .font(.system(size: 15)).foregroundStyle(.secondary)
                             Spacer()
+                            Button("Keep the clock") { engine.correct(g.rows, keepClock: true) }
+                                .disabled(engine.progress.running)
+                                .help("The clock shown was right; only the zone was wrong. Sets \(g.rows[0].finding.expected) and leaves every time as it reads.")
                             Button("Correct \(g.rows.count == 1 ? "it" : "all \(g.rows.count)")") { engine.correct(g.rows) }
                                 .buttonStyle(.bigProminent).controlSize(.regular)
                                 .disabled(engine.progress.running)
+                                .help("The moment was right; the clock shown was not. Moves each clock to \(g.rows[0].finding.expected).")
                         }
                         ForEach(g.rows.prefix(open == g.key ? g.rows.count : 2)) { AuditRowView(row: $0) }
                         if g.rows.count > 2 {

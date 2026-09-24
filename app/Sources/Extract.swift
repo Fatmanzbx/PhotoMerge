@@ -96,6 +96,16 @@ enum Extractor {
     /// The content hash the catalog stores, for any bytes.
     static func sha(_ data: Data) -> String { hex(SHA256.hash(data: data)) }
 
+    /// The same hash, streamed from disk in 4 MB pieces: a 4 GB video must not be
+    /// read whole into memory to be checked (review finding 8). Nil if unreadable.
+    static func shaOfFile(_ path: String) -> String? {
+        guard let fh = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? fh.close() }
+        var h = SHA256()
+        while let chunk = try? fh.read(upToCount: 4 << 20), !chunk.isEmpty { h.update(data: chunk) }
+        return hex(h.finalize())
+    }
+
     private static func hex(_ d: some Sequence<UInt8>) -> String {
         d.map { String(format: "%02x", $0) }.joined()
     }

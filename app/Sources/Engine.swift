@@ -66,6 +66,23 @@ final class Engine: ObservableObject {
 
     // MARK: lifecycle
 
+    /// Why the catalog could not be opened, and where it is, for the recovery screen.
+    @Published var catalogTrouble: (url: URL, why: String)?
+
+    /// Put the catalog that will not open aside and start a fresh one. Nothing but
+    /// the app's own records is affected; the photographs are read again.
+    func startFreshCatalog() {
+        guard let t = catalogTrouble else { return }
+        let fm = FileManager.default
+        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        for suffix in ["", "-wal", "-shm"] {
+            let p = t.url.path + suffix
+            if fm.fileExists(atPath: p) { try? fm.moveItem(atPath: p, toPath: t.url.path + ".broken-\(stamp)" + suffix) }
+        }
+        catalogTrouble = nil
+        open()
+    }
+
     func open() {
         guard catalog == nil else { return }
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -74,7 +91,13 @@ final class Engine: ObservableObject {
         // so the flow can be looked at on a test collection without touching the real one.
         let url = ProcessInfo.processInfo.environment["PM_CATALOG"].map { URL(fileURLWithPath: $0) }
             ?? dir.appendingPathComponent("catalog.sqlite")
-        catalog = try? Catalog(url: url)
+        do { catalog = try Catalog(url: url) }
+        catch {
+            // Every method guards `catalog`; this is the one place it is made. A locked,
+            // corrupt or unwritable catalog must not crash every launch (review finding 7).
+            catalogTrouble = (url, "\(error)")
+            return
+        }
         if let c = catalog { params = Pipeline.params(c); radius = Pipeline.radius(c) }
         // dev aid: `open -g --env PM_TAB=write …` opens on a pane without any input
         if let t = ProcessInfo.processInfo.environment["PM_TAB"],
@@ -123,7 +146,10 @@ final class Engine: ObservableObject {
     func removeAll() {
         guard let c = catalog else { return }
         try? c.transaction {
-            try c.run("DELETE FROM member; DELETE FROM cluster; DELETE FROM file; DELETE FROM source;")
+            // everything derived from the files goes with them; a manifest or trash row
+            // left behind would attach to an unrelated new file with a reused id
+            try c.run("DELETE FROM output; DELETE FROM trashed; DELETE FROM resolution; DELETE FROM pair; "
+                    + "DELETE FROM member; DELETE FROM cluster; DELETE FROM file; DELETE FROM source;")
         }
         groups = []
         refreshSources(); refreshStats()
@@ -190,6 +216,9 @@ final class Engine: ObservableObject {
             if !r.unavailable.isEmpty {
                 self.notice = "Skipped \(r.unavailable.count) source\(r.unavailable.count == 1 ? "" : "s") that could not be found — an unplugged drive? Nothing from \(r.unavailable.count == 1 ? "it" : "them") was forgotten."
             }
+            if !r.denied.isEmpty {
+                self.notice = "macOS did not let PhotoMerge read \((r.denied[0] as NSString).lastPathComponent). Allow it under System Settings → Privacy & Security → Files and Folders, then read again."
+            }
         }
     }
 
@@ -237,13 +266,16 @@ final class Engine: ObservableObject {
         await MainActor.run { self.progress.stage = "grouping"; self.progress.done = 0; self.progress.total = 0 }
         let radius = await MainActor.run { self.radius }
         Pipeline.setRadius(c, radius)
-        _ = try? Pipeline.cluster(c, radius: radius)
+        do { _ = try Pipeline.cluster(c, radius: radius) }
+        catch { await MainActor.run { self.notice = "Grouping failed: \(error). The catalog may be full or locked; nothing was lost." } }
     }
 
     /// Stage 4 — time, place and zone (PLAN §7.2, §7.3), honouring your choices.
     private nonisolated func resolveAll(_ c: Catalog) async {
         await MainActor.run { self.progress.stage = "resolving"; self.progress.done = 0; self.progress.total = 0 }
-        guard let res = try? Pipeline.resolve(c) else { return }
+        let res: Pipeline.Resolution
+        do { res = try Pipeline.resolve(c) }
+        catch { await MainActor.run { self.notice = "Working out dates and places failed: \(error). Nothing was lost." }; return }
         // Whatever is still unzoned becomes a ballot for the person to settle.
         let bs = Resolver.ballots(res.inputs, res.resolved)
         await MainActor.run { self.ballots = bs }
@@ -617,11 +649,18 @@ final class Engine: ObservableObject {
     /// Remove the merged copy — only files still exactly as written.
     func undoWrite() {
         guard let c = catalog, let root = outputRoot, task == nil else { return }
-        let u = Act.undo(c, root: root)
-        notice = "Removed \(u.removed) written file\(u.removed == 1 ? "" : "s")"
-            + (u.keptChanged > 0 ? "; kept \(u.keptChanged) you have changed since" : "") + ". Originals untouched."
-        actReport = nil
-        refreshActSummary()
+        progress = Progress(stage: "removing", running: true)
+        task = Task.detached(priority: .userInitiated) { [weak self] in
+            let u = Act.undo(c, root: root) { d, t in Task { @MainActor in self?.progress.done = d; self?.progress.total = t } }
+            await MainActor.run {
+                guard let self else { return }
+                self.progress.running = false; self.progress.stage = "done"; self.task = nil
+                self.notice = "Removed \(u.removed) written file\(u.removed == 1 ? "" : "s")"
+                    + (u.keptChanged > 0 ? "; kept \(u.keptChanged) you have changed since" : "") + ". Originals untouched."
+                self.actReport = nil
+                self.refreshActSummary()
+            }
+        }
     }
 
     // MARK: undo — one history for every choice
@@ -634,7 +673,10 @@ final class Engine: ObservableObject {
     /// Call before any action that changes a decision. Undo restores exactly this.
     func snapshotForUndo(_ name: String) {
         guard let c = catalog else { return }
-        let before = Snapshot.take(c)
+        guard let before = try? Snapshot.take(c) else {
+            notice = "Could not record the state before “\(name)”, so ⌘Z will not undo it. The catalog may be locked or full."
+            return
+        }
         undoManager.registerUndo(withTarget: self) { eng in eng.restore(before, name: name) }
         undoManager.setActionName(name)
         undoTick += 1
@@ -642,8 +684,9 @@ final class Engine: ObservableObject {
 
     private func restore(_ snap: Snapshot, name: String) {
         guard let c = catalog else { return }
-        let now = Snapshot.take(c)
-        undoManager.registerUndo(withTarget: self) { eng in eng.restore(now, name: name) }  // becomes redo
+        if let now = try? Snapshot.take(c) {
+            undoManager.registerUndo(withTarget: self) { eng in eng.restore(now, name: name) }  // becomes redo
+        }
         undoManager.setActionName(name)
         snap.apply(c)
         params = Pipeline.params(c); radius = Pipeline.radius(c)
@@ -670,28 +713,45 @@ final class Engine: ObservableObject {
         tidied = c.scalarInt("SELECT COUNT(*) FROM trashed;")
     }
 
+    /// Tidy reads every duplicate and its kept copy to be sure of them; on a real
+    /// library that is minutes of disk work, so it runs off the main actor with
+    /// progress, and the window stays alive (review finding 8).
     func tidy() {
         guard let c = catalog, task == nil else { return }
-        let r = Tidy.run(c)
-        notice = "Moved \(r.moved) extra cop\(r.moved == 1 ? "y" : "ies") (\(byteString(r.bytes))) to the Trash"
-            + (r.skipped > 0 ? "; left \(r.skipped) that had changed" : "") + ". ⌘Z puts them back."
-        if r.moved > 0 {
-            undoManager.registerUndo(withTarget: self) { eng in eng.putBack() }
-            undoManager.setActionName("Move duplicates to the Trash")
-            undoTick += 1
+        progress = Progress(stage: "tidying", running: true)
+        task = Task.detached(priority: .userInitiated) { [weak self] in
+            let r = Tidy.run(c) { d, t in Task { @MainActor in self?.progress.done = d; self?.progress.total = t } }
+            await MainActor.run {
+                guard let self else { return }
+                self.progress.running = false; self.progress.stage = "done"; self.task = nil
+                self.notice = "Moved \(r.moved) extra cop\(r.moved == 1 ? "y" : "ies") (\(byteString(r.bytes))) to the Trash"
+                    + (r.skipped > 0 ? "; left \(r.skipped) that had changed" : "") + ". ⌘Z puts them back."
+                if r.moved > 0 {
+                    self.undoManager.registerUndo(withTarget: self) { eng in eng.putBack() }
+                    self.undoManager.setActionName("Move duplicates to the Trash")
+                    self.undoTick += 1
+                }
+                self.loadTidy()
+                self.analyse()        // the moved files are gone from their folders: rescan and regroup
+            }
         }
-        loadTidy()
-        analyse()        // the moved files are gone from their folders: rescan and regroup
     }
 
     func putBack() {
         guard let c = catalog, task == nil else { return }
-        let r = Tidy.restore(c)
-        notice = "Put back \(r.restored) cop\(r.restored == 1 ? "y" : "ies")"
-            + (r.occupied > 0 ? "; \(r.occupied) could not go back because a file now has that name" : "")
-            + (r.missing > 0 ? "; \(r.missing) were no longer in the Trash" : "") + "."
-        loadTidy()
-        analyse()
+        progress = Progress(stage: "restoring", running: true)
+        task = Task.detached(priority: .userInitiated) { [weak self] in
+            let r = Tidy.restore(c)
+            await MainActor.run {
+                guard let self else { return }
+                self.progress.running = false; self.progress.stage = "done"; self.task = nil
+                self.notice = "Put back \(r.restored) cop\(r.restored == 1 ? "y" : "ies")"
+                    + (r.occupied > 0 ? "; \(r.occupied) could not go back because a file now has that name" : "")
+                    + (r.missing > 0 ? "; \(r.missing) were no longer in the Trash" : "") + "."
+                self.loadTidy()
+                self.analyse()
+            }
+        }
     }
 
     // MARK: the guided path
@@ -975,11 +1035,13 @@ final class Engine: ObservableObject {
         }
     }
 
-    /// Correct these photographs to the offset their surroundings record.
-    func correct(_ rows: [AuditRow]) {
+    /// Correct these photographs to the offset their surroundings record: the moment
+    /// stands and the clock moves — or, with `keepClock`, the clock stands and the
+    /// moment moves, for a camera that showed local time under a wrongly stamped zone.
+    func correct(_ rows: [AuditRow], keepClock: Bool = false) {
         guard let c = catalog, !progress.running else { return }
         snapshotForUndo(rows.count == 1 ? "Correct a time zone" : "Correct \(rows.count) time zones")
-        Pipeline.fix(c, rows.map { ($0.finding.clusterID, $0.finding.expected) })
+        Pipeline.fix(c, rows.map { ($0.finding.clusterID, $0.finding.expected) }, keepClock: keepClock)
         reresolve()
     }
 
@@ -1050,6 +1112,8 @@ final class Engine: ObservableObject {
         let path: String
         var files = 0, images = 0, videos = 0, bytes = 0
         var unread = 0, unreadable = 0
+        var unrecognised = 0                 // files that are not a photo or video the app reads
+        var unrecognisedKinds = ""           // "avi ×3, mkv ×1"
         var earliest: String?, latest: String?
         var available = true
         var exclude = ""
@@ -1065,7 +1129,7 @@ final class Engine: ObservableObject {
                    COALESCE(SUM(f.size),0), COALESCE(SUM(f.state='scanned'),0),
                    COALESCE(SUM(f.state='failed'),0),
                    MIN(CASE WHEN f.captured_at >= '1990' THEN f.captured_at END), MAX(f.captured_at),
-                   COALESCE(s.exclude, '')
+                   COALESCE(s.exclude, ''), COALESCE(s.unrecognised, 0), COALESCE(s.unrecognised_kinds, '')
             FROM source s LEFT JOIN file f ON f.source_id = s.id
             GROUP BY s.id ORDER BY s.id;
             """) {
@@ -1074,6 +1138,7 @@ final class Engine: ObservableObject {
                 i.files = st.int(2); i.images = st.int(3); i.videos = st.int(4); i.bytes = st.int(5)
                 i.unread = st.int(6); i.unreadable = st.int(7)
                 i.earliest = st.text(8); i.latest = st.text(9); i.exclude = st.text(10) ?? ""
+                i.unrecognised = st.int(11); i.unrecognisedKinds = st.text(12) ?? ""
                 var dir: ObjCBool = false
                 i.available = FileManager.default.fileExists(atPath: i.path, isDirectory: &dir) && dir.boolValue
                 out.append(i)
@@ -1142,8 +1207,10 @@ final class Engine: ObservableObject {
         placeBreakdown = rows
     }
 
+    @Published var groupsTotal = 0     // all groups with a duplicate; `groups` shows the first `limit`
     func loadGroups(limit: Int = 300) {
         guard let c = catalog else { return }
+        groupsTotal = c.scalarInt("SELECT COUNT(*) FROM cluster c WHERE EXISTS (SELECT 1 FROM member d WHERE d.cluster_id = c.id AND d.role = 'duplicate');")
         var out: [Group] = []
         if let st = try? c.prepare("""
             SELECT c.id, c.method, (SELECT COUNT(*) FROM member x WHERE x.cluster_id = c.id AND x.role IN ('canonical','duplicate')), c.wasted,

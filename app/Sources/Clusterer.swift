@@ -162,6 +162,25 @@ enum Clusterer {
         return ta != tb
     }
 
+    /// Two copies of one photograph keep its proportions (a rotation is normalised
+    /// before hashing). A 4:3 frame and a square one are not the same image, whatever
+    /// a square grid says. Unknown dimensions cannot object.
+    static func sameShape(_ a: Item, _ b: Item) -> Bool {
+        guard a.width > 0, a.height > 0, b.width > 0, b.height > 0 else { return true }
+        let ra = Double(max(a.width, a.height)) / Double(min(a.width, a.height))
+        let rb = Double(max(b.width, b.height)) / Double(min(b.width, b.height))
+        return abs(ra - rb) / max(ra, rb) <= 0.02
+    }
+
+    /// A thumb with almost no variation — a black frame, a blank wall, a white
+    /// page — matches every other such frame. It is not evidence of anything.
+    static func featureless(_ g: [UInt8]) -> Bool {
+        guard !g.isEmpty else { return true }
+        let mean = Double(g.reduce(0) { $0 + Int($1) }) / Double(g.count)
+        let variance = g.reduce(0.0) { $0 + (Double($1) - mean) * (Double($1) - mean) } / Double(g.count)
+        return variance.squareRoot() < 3
+    }
+
     struct Group {
         var members: [Int]        // indices into the input array
         var canonical: Int        // index of the copy to keep
@@ -226,10 +245,29 @@ enum Clusterer {
 
         // Tier B — same image content, different bytes: a re-encode or a metadata
         // rewrite. This is what makes re-exporting a source cheap (INHERITED §3.1).
-        var byPixel: [String: Int] = [:]
+        // The hash is a 64×64 grey grid, so it also matches two black frames, or a
+        // frame and its crop scaled to the same grid: the same guards as tier C
+        // apply — different capture instants, a different shape, or nothing to see
+        // in the picture, and the pair stays apart (review finding 1).
+        var byPixel: [String: [Int]] = [:]
         for (i, it) in items.enumerated() {
             guard let p = it.pixel else { continue }
-            if let j = byPixel[p] { ds.union(j, i); r.tierC += 0; r.tierB += 1 } else { byPixel[p] = i }
+            if let js = byPixel[p] {
+                var joined = false
+                for j in js {
+                    let other = items[j]
+                    if differentMoments(it, other) { r.separated += 1; continue }
+                    if !sameShape(it, other) { r.rejected += 1; continue }
+                    // two blank frames agree on every pixel and prove nothing; only a
+                    // shared capture instant can say they are one photograph
+                    if let t = it.thumb, featureless(t), it.capturedAt == nil || other.capturedAt == nil {
+                        r.unverifiable += 1; continue
+                    }
+                    ds.union(j, i); joined = true; break
+                }
+                if joined { r.tierB += 1 }
+                byPixel[p]!.append(i)
+            } else { byPixel[p] = [i] }
         }
 
         // Tier C — perceptual neighbours within the radius dial, each VERIFIED.

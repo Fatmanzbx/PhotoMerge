@@ -51,6 +51,12 @@ enum Ingest {
         /// Sources whose folder is missing — an unplugged drive. Their files are
         /// left exactly as they were: an absent folder is not an empty one.
         var unavailable: [String] = []
+        /// Sources macOS would not let the app read: a folder it was denied access to.
+        var denied: [String] = []
+        /// Files that are not a photo or video the app can read — camcorder AVIs,
+        /// documents, unknown RAW containers — counted so nobody mistakes "all read"
+        /// for "all seen" (review finding 5).
+        var unrecognised = 0
     }
 
     static func scan(_ c: Catalog, limit: Int? = nil, stop: Stop = Stop(),
@@ -68,6 +74,11 @@ enum Ingest {
             guard FileManager.default.fileExists(atPath: root, isDirectory: &isDir), isDir.boolValue else {
                 r.unavailable.append(root); continue
             }
+            guard FileManager.default.isReadableFile(atPath: root),
+                  (try? FileManager.default.contentsOfDirectory(atPath: root)) != nil else {
+                r.denied.append(root); continue
+            }
+            var skipped: [String: Int] = [:]      // by extension, for the source's own record
             // what the catalog already knows about this source
             var known: [String: (size: Int, mtime: Double)] = [:]
             if let st = try? c.prepare("SELECT path, size, mtime FROM file WHERE source_id = ?;") {
@@ -122,6 +133,11 @@ enum Ingest {
                     guard rv?.isRegularFile == true else {
                         // an excluded folder is not walked at all
                         if !ex.isEmpty, ex.excludesFolder(u.lastPathComponent) { e.skipDescendants() }
+                        // Another Photos library inside a source is a package, not a folder
+                        // of photographs: its derivatives are thumbnails of its originals,
+                        // and would show up as duplicates of them (review finding 11).
+                        // A source that *is* an originals folder is walked as before.
+                        if u.pathExtension == "photoslibrary", !resolvedRoot.hasPrefix(u.path + "/") { e.skipDescendants() }
                         continue
                     }
                     let path = u.path
@@ -139,7 +155,12 @@ enum Ingest {
                             touched.append((path, size, mtime)); r.changed += 1
                         }
                     } else {
-                        guard let kind = Sniff.sniff(u) else { continue }   // magic bytes, not extension
+                        guard let kind = Sniff.sniff(u) else {              // magic bytes, not extension
+                            let ext = u.pathExtension.lowercased()
+                            skipped[ext.isEmpty ? "(no extension)" : ext, default: 0] += 1
+                            r.unrecognised += 1
+                            continue
+                        }
                         seen.insert(path); r.seen += 1; r.added += 1
                         let rel = path.hasPrefix(resolvedRoot + "/") ? String(path.dropFirst(resolvedRoot.count + 1))
                                 : path.hasPrefix(root + "/") ? String(path.dropFirst(root.count + 1))
@@ -151,8 +172,14 @@ enum Ingest {
             }
             flush(); progress(r.seen)
 
-            // Only a walk that finished may conclude a file is gone.
+            // Only a walk that finished may conclude a file is gone, or say what it skipped.
             if complete {
+                let kinds = skipped.sorted { $0.value > $1.value }.prefix(8)
+                    .map { "\($0.key) ×\($0.value)" }.joined(separator: ", ")
+                try? c.transaction {
+                    let st = try c.prepare("UPDATE source SET unrecognised = ?, unrecognised_kinds = ? WHERE id = ?;")
+                    st.bind(1, skipped.values.reduce(0, +)).bind(2, kinds.isEmpty ? nil : kinds).bind(3, sid).done(); st.finalize()
+                }
                 let gone = known.keys.filter { !seen.contains($0) }
                 if !gone.isEmpty {
                     try? c.transaction {

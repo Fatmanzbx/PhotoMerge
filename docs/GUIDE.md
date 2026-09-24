@@ -8,18 +8,25 @@ modified.
 ## Install
 
 **Requirements:** a Mac with Apple silicon (M1 or later) or Intel, running macOS 14
-Sonoma or newer. About 20 MB of disk for the app; a clean library needs as much free
-space as the photos you keep.
+Sonoma or newer. About 30 MB of disk for the app; a clean library needs as much free
+space as the photos you keep. The Intel build is produced from the same source but has
+not yet been run on an Intel Mac — please report how it goes.
 
 1. Download `PhotoMerge-<version>.dmg` from the
    [latest release](https://github.com/Fatmanzbx/PhotoMerge/releases/latest).
 2. Open the `.dmg` and drag **PhotoMerge** into **Applications**.
-3. The first time, **right-click PhotoMerge → Open**, then click **Open** in the
-   dialog. macOS shows this warning because the app is not signed with a paid Apple
-   developer certificate; it is only needed once.
+3. The first launch needs one extra step, because the app is not signed with a paid
+   Apple developer certificate. Double-click PhotoMerge; macOS will refuse and say it
+   could not verify the app. Then:
 
-   If macOS says the app "is damaged and can't be opened", it has quarantined the
-   download. Remove the flag in Terminal and open it again:
+   - **macOS 15 Sequoia and later:** open **System Settings → Privacy & Security**,
+     scroll to the *Security* section, and next to "PhotoMerge was blocked" click
+     **Open Anyway**. Confirm with your password or Touch ID. This is needed once.
+   - **macOS 14 Sonoma:** right-click PhotoMerge → **Open**, then click **Open** in the
+     dialog. Once.
+
+   If macOS instead says the app "is damaged and can't be opened", the download was
+   quarantined. Clear the flag in Terminal and open it again:
 
    ```sh
    xattr -d com.apple.quarantine /Applications/PhotoMerge.app
@@ -46,6 +53,11 @@ any time and it carries on where it stopped.
 
 To skip part of a folder (a "Screenshots" subfolder, `*.png`), click **Exclude…** on
 that folder.
+
+PhotoMerge reads JPEG, PNG, GIF, WebP, HEIC/HEIF/AVIF, TIFF and TIFF-based RAW (NEF,
+ARW, CR2, DNG…) and MP4/MOV/M4V/3GP video. Files of other kinds — AVI, MKV, WMV, PSD —
+are counted on the folder's card as "not photos or videos the app reads" and are not
+included in a clean library; keep them where they are.
 
 ### 2 · Duplicates
 
@@ -76,7 +88,11 @@ to you:
   (50 km). Look through an area; if a few are wrong, give them their real place under
   *Fill in by hand* first (they leave the area), then **Accept all** for the rest.
 - **Checks.** Photos whose time zone cannot be right — clocks at that place showed a
-  different zone at that moment. **Correct** keeps the moment and fixes the clock.
+  different zone at that moment. Two things could be wrong, and only you know which:
+  **Correct** treats the moment as right and moves the clock shown (a time converted
+  under the wrong zone); **Keep the clock** treats the clock as right and moves the
+  moment (a camera on local time whose import stamped its home zone). Look at a few of
+  the before → after rows before pressing either for a whole group.
 - **Which time zone was each day?** Days with a clock but no zone and no way to tell;
   the app lists what the evidence implies and you choose, or leave it.
 - Two sliders for how far a photo without GPS may borrow a place, previewed before you

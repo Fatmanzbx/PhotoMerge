@@ -52,7 +52,7 @@ Tools** (⌥⌘A) shows every pane below.
 4. **Decisions** → any photograph, and how each fact about it was decided
 5. **Dials** → every threshold, previewed on your photographs before it is applied
 
-⌘1–⌘8 move between panes; ⌘R analyses (resuming if interrupted), ⌘. stops; ⌘E exports every photograph's findings as CSV or JSON.
+⌘1–⌘7 move between panes; ⌘R analyses (resuming if interrupted), ⌘. stops; ⌘E exports every photograph's findings as CSV or JSON.
 The export, written only where you choose, is the one file PhotoMerge writes outside
 its own catalog. Your photographs are never touched.
 
@@ -434,7 +434,7 @@ Sources/Act.swift         the merged copy: plan, write, verify, commit, undo
 Sources/ExifTool.swift    the bundled exiftool, stay-open
 Sources/Engine.swift      orchestration, parallel to performance cores
 Sources/Design.swift      the visual language: spacing, metrics, cards, pills
-Sources/App.swift         app, sidebar, scoreboard, progress, ⌘1–⌘5, ⌘E
+Sources/App.swift         app, sidebar, scoreboard, progress, ⌘1–⌘7, ⌘E
 Sources/Views.swift       Sources, Duplicates, To review, Dates & places, thumbnails
 Sources/DecisionsView.swift  the Decisions pane
 Sources/DialsView.swift   the Dials pane

@@ -300,23 +300,26 @@ enum Pipeline {
     }
 
     /// Corrected offsets, from content hashes to this grouping's clusters.
-    static func fixes(_ c: Catalog) -> [Int: String] {
-        var out: [Int: String] = [:]
+    static func fixes(_ c: Catalog) -> [Int: Resolver.Fix] {
+        var out: [Int: Resolver.Fix] = [:]
         if let st = try? c.prepare("""
-            SELECT m.cluster_id, z.utc_offset FROM zone_fix z
+            SELECT m.cluster_id, z.utc_offset, z.keep_clock FROM zone_fix z
             JOIN file f ON f.sha256 = z.sha JOIN member m ON m.file_id = f.id;
             """) {
-            while st.step() { if let o = st.text(1) { out[st.int(0)] = o } }
+            while st.step() { if let o = st.text(1) { out[st.int(0)] = Resolver.Fix(offset: o, keepClock: st.int(2) != 0) } }
             st.finalize()
         }
         return out
     }
 
-    /// Correct these clusters' offsets (keeping their instants), or withdraw with nil.
-    static func fix(_ c: Catalog, _ changes: [(cluster: Int, offset: String?)]) {
+    /// Correct these clusters' offsets, or withdraw with nil. By default the instant
+    /// stands and the clock moves (a correct moment stored under the wrong zone);
+    /// with `keepClock` the clock stands and the instant moves (a camera on local time
+    /// whose import stamped a home offset) — review finding 13.
+    static func fix(_ c: Catalog, _ changes: [(cluster: Int, offset: String?)], keepClock: Bool = false) {
         try? c.transaction {
             let shas = try c.prepare("SELECT f.sha256 FROM member m JOIN file f ON f.id = m.file_id WHERE m.cluster_id = ? AND f.sha256 IS NOT NULL;")
-            let ins = try c.prepare("INSERT OR REPLACE INTO zone_fix(sha, utc_offset, chosen_at) VALUES(?,?,?);")
+            let ins = try c.prepare("INSERT OR REPLACE INTO zone_fix(sha, utc_offset, chosen_at, keep_clock) VALUES(?,?,?,?);")
             let del = try c.prepare("DELETE FROM zone_fix WHERE sha = ?;")
             for ch in changes {
                 shas.bind(1, ch.cluster)
@@ -324,7 +327,7 @@ enum Pipeline {
                 while shas.step() { if let h = shas.text(0) { hs.append(h) } }
                 shas.reset()
                 for h in hs {
-                    if let o = ch.offset { ins.bind(1, h).bind(2, o).bind(3, Date().timeIntervalSince1970).done(); ins.reset() }
+                    if let o = ch.offset { ins.bind(1, h).bind(2, o).bind(3, Date().timeIntervalSince1970).bind(4, keepClock ? 1 : 0).done(); ins.reset() }
                     else { del.bind(1, h).done(); del.reset() }
                 }
             }

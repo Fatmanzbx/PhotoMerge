@@ -30,9 +30,10 @@ the files you give it, and every choice it makes — or you make — can be undo
 ## Download and install
 
 Get `PhotoMerge-<version>.dmg` from the **[latest release](https://github.com/Fatmanzbx/PhotoMerge/releases/latest)**, open
-it and drag PhotoMerge into Applications. The first time, right-click the app and choose
-**Open** (it is not signed with a paid Apple certificate). macOS 14 or newer, Apple silicon
-or Intel.
+it and drag PhotoMerge into Applications. The app is not signed with a paid Apple
+certificate, so the first launch takes one extra step: on macOS 15 and later, System
+Settings → Privacy & Security → **Open Anyway**; on macOS 14, right-click → Open. macOS 14
+or newer; Apple silicon, with an Intel build that has not yet been tested on an Intel Mac.
 
 **[Install and use →](docs/GUIDE.md)** walks through the four steps.
 
@@ -42,6 +43,7 @@ or Intel.
 |---|---|
 | [`app/`](app/) | **PhotoMerge.app**, the macOS app (Swift, SwiftUI). Start here. |
 | [`docs/GUIDE.md`](docs/GUIDE.md) | Install and use: the four steps, what each button does, what the app never does. |
+| [`CHANGELOG.md`](CHANGELOG.md) · [`review.md`](review.md) | What changed in each release, and the code review that drove 1.0.1. |
 | [`app/docs/`](app/docs/) | Its design: plan, roadmap, the lessons it inherited, and technical spikes. |
 | [`cli/`](cli/) | The original command-line tool (Python) the app grew out of, with its tests. |
 | [`docs/BUILDLOG.md`](docs/BUILDLOG.md) | The story of the first real merge — 25,471 files — and every edge case it hit. |

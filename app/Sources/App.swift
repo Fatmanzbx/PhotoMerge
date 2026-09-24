@@ -34,7 +34,7 @@ struct PhotoMergeApp: App {
         WindowGroup("PhotoMerge") {
             ContentView()
                 .environmentObject(engine)
-                .frame(minWidth: 1120, minHeight: 720)
+                .frame(minWidth: 1000, minHeight: 680)
                 .onAppear { engine.open() }
                 .sheet(isPresented: $welcome) { WelcomeSheet() }
                 .onAppear {
@@ -136,12 +136,30 @@ struct ContentView: View {
     var body: some View {
         Group {
             // dev aid: PM_HELP=inline shows Help in the main window, for a screenshot
-            if ProcessInfo.processInfo.environment["PM_HELP"] == "inline" { HelpWindow() }
+            if let t = engine.catalogTrouble { CatalogTroubleView(url: t.url, why: t.why) }
+            else if ProcessInfo.processInfo.environment["PM_HELP"] == "inline" { HelpWindow() }
             else if engine.advanced { AdvancedView() } else { GuidedView() }
         }
         .font(.system(size: 20))   // the default for anything unstyled; macOS ignores dynamicTypeSize, so every style is an explicit size, 1.5× the system's
         .buttonStyle(.bigBordered) // buttons to match; see BigButton
         .onAppear { if ProcessInfo.processInfo.environment["PM_HELP"] == "1" { HelpController.shared.show() } }
+    }
+}
+
+/// The catalog — the app's own record of what it read and what you decided — would
+/// not open. The photographs are untouched; the record can be put aside and rebuilt.
+struct CatalogTroubleView: View {
+    @EnvironmentObject var engine: Engine
+    let url: URL, why: String
+    var body: some View {
+        EmptyState(icon: "externaldrive.badge.exclamationmark", title: "PhotoMerge's records could not be opened",
+                   message: "The file that holds what the app read and what you decided (\(url.lastPathComponent)) would not open: \(why). Your photos are not affected. You can put the file aside and start again — the folders you added are read afresh, and choices made so far are lost.") {
+            HStack {
+                Button("Show the file") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+                Button("Put it aside and start again") { engine.startFreshCatalog() }.buttonStyle(.bigProminent)
+            }
+        }
+        .padding(D.Space.xl).background(D.canvas)
     }
 }
 

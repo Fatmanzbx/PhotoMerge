@@ -13,6 +13,8 @@ enum Gazetteer {
         let population: Int
         let local: [String]              // Chinese, Japanese, Korean names
         var zone: String = ""            // IANA time zone, e.g. "Asia/Shanghai"
+        /// The names as searched — case and accents folded — computed once at load.
+        var folded: [String] = []
         var label: String { country.isEmpty || country == name ? name : "\(name), \(country)" }
         var fullLabel: String {
             [name, region == name ? "" : region, country].filter { !$0.isEmpty }.joined(separator: ", ")
@@ -40,7 +42,8 @@ enum Gazetteer {
             out.append(Place(name: f[0], ascii: f[1].isEmpty ? f[0] : f[1], lat: la, lon: lo,
                              region: f[4], country: f[5], population: Int(f[6]) ?? 0,
                              local: f[7].isEmpty ? [] : f[7].split(separator: ",").map(String.init),
-                             zone: f.count > 8 ? f[8] : ""))
+                             zone: f.count > 8 ? f[8] : "",
+                             folded: [fold(f[0]), fold(f[1].isEmpty ? f[0] : f[1])]))
         }
         return out
     }()
@@ -101,7 +104,7 @@ enum Gazetteer {
         guard q.count >= 2 || q.unicodeScalars.contains(where: { $0.value > 0x2E80 }) else { return [] }
         var exact: [Place] = [], prefix: [Place] = []
         for p in places {           // sorted by population already
-            let names = [fold(p.name), fold(p.ascii)] + p.local
+            let names = p.folded + p.local
             if names.contains(q) { exact.append(p) }
             else if names.contains(where: { $0.hasPrefix(q) }) { prefix.append(p) }
             if exact.count >= limit { break }

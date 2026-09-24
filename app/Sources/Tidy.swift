@@ -34,7 +34,8 @@ enum Tidy {
             FROM member d JOIN file fd ON fd.id = d.file_id
             JOIN member k ON k.cluster_id = d.cluster_id AND k.role = 'canonical'
             JOIN file fk ON fk.id = k.file_id
-            WHERE d.role = 'duplicate' AND d.file_id NOT IN (SELECT file_id FROM trashed)
+            WHERE d.role = 'duplicate'
+              AND d.file_id NOT IN (SELECT t.file_id FROM trashed t WHERE t.original = fd.path)
             ORDER BY fd.path;
             """) {
             while st.step() {
@@ -64,15 +65,19 @@ enum Tidy {
                         try FileManager.default.trashItem(at: u, resultingItemURL: &out)
                         return (out as URL?) ?? u
                     },
-                    trashFolder: (URL) -> URL? = systemTrash) -> Report {
+                    trashFolder: (URL) -> URL? = systemTrash,
+                    progress: (Int, Int) -> Void = { _, _ in }) -> Report {
         reconcile(c, trashFolder: trashFolder)
         var r = Report()
-        for cand in plan(c).candidates {
+        let candidates = plan(c).candidates
+        var keptHash: [String: String?] = [:]      // a kept copy is checked once, not once per duplicate
+        for (n, cand) in candidates.enumerated() {
+            progress(n, candidates.count)
             func skip(_ why: String) { r.skipped += 1; r.reasons.append("\((cand.path as NSString).lastPathComponent): \(why)") }
-            guard let keptData = FileManager.default.contents(atPath: cand.keptPath),
-                  Extractor.sha(keptData) == cand.keptSha else { skip("its kept copy is missing or has changed"); continue }
-            guard let data = FileManager.default.contents(atPath: cand.path) else { skip("it is already gone"); continue }
-            guard Extractor.sha(data) == cand.sha else { skip("it has changed since it was read"); continue }
+            let kept = keptHash[cand.keptPath] ?? { let h = Extractor.shaOfFile(cand.keptPath); keptHash[cand.keptPath] = h; return h }()
+            guard let kept, kept == cand.keptSha else { skip("its kept copy is missing or has changed"); continue }
+            guard let own = Extractor.shaOfFile(cand.path) else { skip("it is already gone"); continue }
+            guard own == cand.sha else { skip("it has changed since it was read"); continue }
             // Recorded before the move, with where it went left blank until known: a
             // crash in between must not leave a file in the Trash that Restore forgot.
             func note(_ trashPath: String) {
@@ -136,7 +141,7 @@ enum Tidy {
                   let names = try? fm.contentsOfDirectory(atPath: folder.path) else { continue }
             let found = names.lazy.map { folder.appendingPathComponent($0).path }.first { p in
                 ((try? fm.attributesOfItem(atPath: p)[.size] as? Int) ?? -2) == size
-                    && fm.contents(atPath: p).map(Extractor.sha) == sha
+                    && Extractor.shaOfFile(p) == sha
             }
             guard let found else { continue }      // stays pending; Restore reports it missing
             try? c.transaction { let st = try c.prepare("UPDATE trashed SET trash_path = ? WHERE file_id = ?;")

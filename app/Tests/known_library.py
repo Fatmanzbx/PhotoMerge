@@ -9,7 +9,12 @@ exiftool and ffmpeg. Scored by Tests/check_known.py.
 """
 import json, os, random, shutil, subprocess, sys, time, calendar
 from pathlib import Path
-from PIL import Image, ImageDraw, ImageEnhance
+try:
+    from PIL import Image, ImageDraw, ImageEnhance
+except ImportError:
+    sys.exit("python3 with Pillow is needed (pip install pillow); the library is drawn with it")
+for tool in ("exiftool", "ffmpeg", "sips"):
+    if not shutil.which(tool): sys.exit(f"{tool} is needed on PATH (brew install exiftool ffmpeg)")
 
 OUT = Path(sys.argv[1]).resolve()
 if OUT.exists(): shutil.rmtree(OUT)

@@ -26,6 +26,7 @@ struct DecisionsView: View {
                             .font(.system(size: 15).monospacedDigit()).foregroundStyle(.secondary)
                         Button { engine.exportFindings() } label: {
                             Image(systemName: "square.and.arrow.up")
+                                .accessibilityLabel("Export findings")
                         }
                         .buttonStyle(.borderless)
                         .help("Export every photograph's findings as CSV or JSON (⌘E)")

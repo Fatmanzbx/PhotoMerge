@@ -12,6 +12,8 @@ cd "$(dirname "$0")/.."
 W=$(mkdir -p "$1" && cd "$1" && pwd); KILLS=${2:-12} ROUNDS=${3:-3}
 LIB=$W/lib CAT=$W/cat.sqlite OUT=$W/out TRASH=$W/trash
 [ -x ./build/tests ] || { echo "build/tests is missing: run ./test.sh first"; exit 1; }
+python3 -c "import PIL" 2>/dev/null || { echo "python3 with Pillow is needed (pip install pillow); the library is drawn with it"; exit 1; }
+command -v ffmpeg >/dev/null || { echo "ffmpeg is needed (brew install ffmpeg) for the test videos"; exit 1; }
 T=./build/tests; CHECK="python3 Tests/crash_check.py $LIB $CAT"
 rm -rf "$W"/{lib,out,trash} "$CAT"*
 fails=0

@@ -67,8 +67,25 @@ func testCascade() {
     eq("tier A counted", r.tierA, 1)
 
     // Tier B: same pixels, different bytes — the case that makes re-export cheap
-    r = Clusterer.cluster([item(1, sha: "a", pixel: "p"), item(2, sha: "b", pixel: "p")], radius: 0)
+    let t0 = "2021:01:01 10:00:00"
+    r = Clusterer.cluster([item(1, sha: "a", pixel: "p", capturedAt: t0), item(2, sha: "b", pixel: "p", capturedAt: t0)], radius: 0)
     eq("tier B groups identical pixels", r.groups.count, 1)
+    // the same grid is not the same photograph when the moments, or the shapes, differ
+    r = Clusterer.cluster([item(1, sha: "a", pixel: "p", capturedAt: "2021:01:01 10:00:00"),
+                           item(2, sha: "b", pixel: "p", capturedAt: "2021:01:02 10:00:00")], radius: 0)
+    eq("tier B never joins two capture instants", r.groups.count, 2)
+    eq("and counts the pair as a burst", r.separated, 1)
+    r = Clusterer.cluster([item(1, sha: "a", pixel: "p", w: 400, h: 300, capturedAt: t0),
+                           item(2, sha: "b", pixel: "p", w: 300, h: 300, capturedAt: t0)], radius: 0)
+    eq("tier B never joins a 4:3 frame to a square one", r.groups.count, 2)
+    r = Clusterer.cluster([item(1, sha: "a", pixel: "p", thumb: detailed(1), capturedAt: t0),
+                           item(2, sha: "b", pixel: "p", thumb: detailed(1), capturedAt: t0)], radius: 0)
+    eq("a rotated copy (same proportions, either way) still joins", r.groups.count, 1)
+    r = Clusterer.cluster([item(1, sha: "a", pixel: "p"), item(2, sha: "b", pixel: "p")], radius: 0)
+    eq("two blank frames with no dates are not one photograph", r.groups.count, 2)
+    eq("and are counted as unverifiable", r.unverifiable, 1)
+    r = Clusterer.cluster([item(1, sha: "a", pixel: "p", thumb: detailed(2)), item(2, sha: "b", pixel: "p", thumb: detailed(2))], radius: 0)
+    eq("two undated frames with detail in them do join", r.groups.count, 1)
     eq("tier B labels the method", r.groups[0].method, "same image")
 
     // Tier C respects the radius dial, and only merges what verification confirms
@@ -145,14 +162,14 @@ func testCascade() {
     eq("mae rejects mismatched sizes", Clusterer.mae([1,2], [1,2,3]), 255.0)
 
     // Best copy: more pixels wins over larger file
-    r = Clusterer.cluster([item(1, sha: "a", pixel: "p", bytes: 9_000, w: 100, h: 100),
-                           item(2, sha: "b", pixel: "p", bytes: 1_000, w: 400, h: 400)], radius: 0)
+    r = Clusterer.cluster([item(1, sha: "a", pixel: "p", bytes: 9_000, w: 100, h: 100, capturedAt: t0),
+                           item(2, sha: "b", pixel: "p", bytes: 1_000, w: 400, h: 400, capturedAt: t0)], radius: 0)
     eq("keeps the larger resolution", r.groups[0].members[r.groups[0].canonical == 0 ? 0 : 0], 1)
     check("canonical is the 400x400 copy", r.groups[0].canonical == 1)
     eq("wasted counts only the losers", r.groups[0].wasted, 9_000)
 
     // Determinism: identical on every criterion must still order stably
-    let tie = [item(7, sha: "x", pixel: "p"), item(3, sha: "y", pixel: "p")]
+    let tie = [item(7, sha: "x", pixel: "p", capturedAt: t0), item(3, sha: "y", pixel: "p", capturedAt: t0)]
     let a = Clusterer.cluster(tie, radius: 0).groups[0].members
     let b = Clusterer.cluster(tie.reversed(), radius: 0).groups[0].members
     eq("tie-break is deterministic", a.map { tie[$0].id }.first, b.map { tie.reversed()[$0].id }.first)
@@ -266,6 +283,16 @@ func testResolver() {
                   input(3, claim("2022:08:16 15:00:00", off: "-06:00"))]
     (dr, ds) = Resolver.resolve(travel)
     eq("a travel day is declined, not averaged", dr[2].placeSource == "same day, same place", false)
+    // a file dated only by its copy date shares no day with anything: no place, no zone from neighbours
+    let copied = Resolver.resolve([input(1, claim("2019:07:14 10:00:00", off: "+08:00", lat: 48.8583, lon: 2.3511)),
+                                   input(2, claim("2019:07:14 11:00:00", off: "+08:00", lat: 48.8590, lon: 2.3500)),
+                                   input(3, claim(nil, mtime: Resolver.epoch("2019:07:14 12:00:00", "+00:00")!))]).out
+    eq("a copy date is marked as such", copied[2].timeSource, "mtime (unreliable)")
+    eq("it takes no place from the day it was copied", copied[2].placeSource, "none")
+    eq("nor a zone from its neighbours", copied[2].zoneSource, "none")
+    // centres on the sphere: a day either side of the antimeridian
+    let c180 = Resolver.sphericalCentre([(0, 179.5), (0, -179.5)])
+    check("a centre straddling 180° stays there, not at 0°", abs(abs(c180.1) - 180) < 0.01)
     eq("decline is counted", ds.declinedDaySpansTooFar > 0, true)
 
     // zone: only a MEASURED fix may certify one (INHERITED §2.16)
@@ -1150,6 +1177,24 @@ func testExifTool() {
     check("a failed write is an error", failed)
 }
 
+func testActRules() {
+    print("\nwhat a merged copy is called and carries")
+    eq("a RAW keeps its own extension", Act.outputExtension("/x/shot.NEF", mime: "image/tiff"), "nef")
+    eq("as does a DNG", Act.outputExtension("/x/shot.dng", mime: "image/tiff"), "dng")
+    eq("a TIFF with no extension gets one", Act.outputExtension("/x/scan", mime: "image/tiff"), "tif")
+    eq("an HEIC named .jpg is written as .heic", Act.outputExtension("/x/IMG.jpg", mime: "image/heic"), "heic")
+    eq("an AVIF keeps its name", Act.outputExtension("/x/a.avif", mime: "image/heic"), "avif")
+    let gif = Act.tags(isVideo: false, local: "2020:05:01 12:00:00", offset: "+01:00", zoneSource: "tag", timeSource: "filename",
+                       lat: 1.0, lon: 2.0, placeSource: "you entered it", fileHasGPS: false, options: .init(), mime: "image/gif")
+    check("a GIF gets no EXIF, which it cannot hold", gif.keys.allSatisfy { !$0.hasPrefix("EXIF:") && !$0.hasPrefix("IPTC:") })
+    eq("its date goes in XMP", gif["XMP-xmp:CreateDate"], "2020:05:01 12:00:00+01:00")
+    check("and its place too", gif["XMP-exif:GPSLatitude"] != nil)
+    let copied = Act.tags(isVideo: false, local: "2020:05:01 12:00:00", offset: nil, zoneSource: "none", timeSource: "mtime (unreliable)",
+                          lat: 48.85, lon: 2.35, placeSource: "same day, same place", fileHasGPS: false, options: .init(writePlaces: true))
+    check("a place worked out for a copy-dated file is never written", copied["EXIF:GPSLatitude"] == nil)
+    check("nor is its date", copied["EXIF:DateTimeOriginal"] == nil)
+}
+
 func testAct() {
     print("\nwriting a merged copy")
     guard ExifTool.locate() != nil else { print("    (exiftool not installed — skipped)"); return }
@@ -1210,6 +1255,18 @@ func testAct() {
     guard let again = try? Act.run(c, root: out.path, workers: 2) else { check("reruns", false); return }
     eq("running again writes nothing", again.written, 0)
     eq("and knows what is done", again.alreadyDone, 3)
+
+    // the copy kept changes (as a keeper choice does): the old file goes, no `_2` appears
+    let aCluster = c.scalarInt("SELECT m.cluster_id FROM member m JOIN file f ON f.id = m.file_id WHERE f.path LIKE '%/A.jpg';")
+    try? c.transaction { try c.run("UPDATE member SET role = CASE role WHEN 'canonical' THEN 'duplicate' ELSE 'canonical' END WHERE cluster_id = \(aCluster);") }
+    let swapped = try? Act.run(c, root: out.path, workers: 2)
+    eq("the new keeper is written", swapped?.written, 1)
+    let written = (try? FileManager.default.subpathsOfDirectory(atPath: out.path))?.filter { !$0.hasSuffix("/") && !$0.contains(".DS_Store") && $0.contains(".") } ?? []
+    eq("and the library still holds one file per photograph", written.count, 3)
+    check("with no _2 beside the old one", !written.contains { $0.contains("_2.") })
+    eq("the manifest agrees", c.scalarInt("SELECT COUNT(*) FROM output WHERE state='verified';"), 3)
+    try? c.transaction { try c.run("UPDATE member SET role = CASE role WHEN 'canonical' THEN 'duplicate' ELSE 'canonical' END WHERE cluster_id = \(aCluster);") }
+    _ = try? Act.run(c, root: out.path, workers: 2)
 
     // a crash mid-file leaves only a partial, which the next run replaces
     try? Data("half".utf8).write(to: URL(fileURLWithPath: Act.partialPath(undated.path)))
@@ -1284,7 +1341,7 @@ func testAudit() {
 
     // correcting keeps the instant and moves the clock
     let wrong = input(1, claim("2018:03:10 01:15:30", off: "-08:00", lat: 1.2903, lon: 103.8520))
-    let (fixed, st) = Resolver.resolve([wrong], fixes: [1: "+08:00"])
+    let (fixed, st) = Resolver.resolve([wrong], fixes: [1: Resolver.Fix(offset: "+08:00")])
     eq("a correction moves the wall clock", fixed[0].localTime, "2018:03:10 17:15:30")
     eq("and keeps the instant", fixed[0].instant, Resolver.epoch("2018:03:10 01:15:30", "-08:00"))
     eq("and says who corrected it", fixed[0].zoneSource, "you corrected it")
@@ -1293,6 +1350,11 @@ func testAudit() {
                         zoneSource: fixed[0].zoneSource, timeSource: fixed[0].timeSource, lat: nil, lon: nil,
                         placeSource: "measured", fileHasGPS: true, options: .init())
     eq("the merged copy writes the corrected clock", tags["EXIF:DateTimeOriginal"], "2018:03:10 17:15:30")
+    // or the clock was right and only the zone was wrong: the clock stays, the moment moves
+    let kept = Resolver.resolve([wrong], fixes: [1: Resolver.Fix(offset: "+08:00", keepClock: true)]).out[0]
+    eq("keeping the clock leaves the wall time", kept.localTime, "2018:03:10 01:15:30")
+    eq("and moves the instant to that clock in the new zone", kept.instant, Resolver.epoch("2018:03:10 01:15:30", "+08:00"))
+    eq("under the corrected offset", kept.utcOffset, "+08:00")
     eq("and the corrected offset", tags["EXIF:OffsetTimeOriginal"], "+08:00")
 }
 
@@ -1391,7 +1453,7 @@ func testSnapshot() {
         INSERT INTO zone_pick VALUES(18000, '+08:00', 1);
         INSERT INTO pair_decision VALUES('a', 'b', 1, 1);
         INSERT INTO keeper VALUES('k', 1);
-        INSERT INTO zone_fix VALUES('z', '+08:00', 1);
+        INSERT INTO zone_fix(sha, utc_offset, chosen_at) VALUES('z', '+08:00', 1);
         INSERT INTO manual_fact(sha, day, lat, lon, set_at) VALUES('m', '2015:08:01', 1.29, 103.85, 1);
         INSERT INTO place_rule(folder, lat, lon, label, created) VALUES('Trip', 1.5, 2.5, 'it''s here', 1);
         INSERT INTO setting VALUES('radius', '4');
@@ -1407,7 +1469,7 @@ func testSnapshot() {
         }.joined(separator: "\n") + "\nexclude:" + (c.setting("x") ?? "") + String(c.scalarInt("SELECT length(exclude) FROM source;"))
     }
     let before = state()
-    let snap = Snapshot.take(c)
+    guard let snap = try? Snapshot.take(c) else { check("a snapshot can be taken", false); return }
     try? c.transaction { try c.run("""
         DELETE FROM zone_pick; UPDATE keeper SET sha='changed'; DELETE FROM manual_fact;
         INSERT INTO place_rule(folder, lat, lon, label, created) VALUES('Other', 0, 0, 'x', 2);
@@ -1860,6 +1922,7 @@ testGuide()
 testSnapshot()
 testTidy()
 testAreas()
+testActRules()
 testGazetteer()
 if let root {
     testSniff(root)

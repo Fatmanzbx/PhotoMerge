@@ -97,10 +97,14 @@ enum Act {
     static func outputExtension(_ path: String, mime: String?) -> String {
         let ext = (path as NSString).pathExtension.lowercased()
         let families: [String: [String]] = [
-            "image/jpeg": ["jpg", "jpeg"], "image/heic": ["heic", "heif"], "image/png": ["png"],
-            "image/gif": ["gif"], "image/tiff": ["tif", "tiff", "dng"], "image/webp": ["webp"],
+            "image/jpeg": ["jpg", "jpeg"], "image/heic": ["heic", "heif", "avif"], "image/png": ["png"],
+            "image/gif": ["gif"], "image/webp": ["webp"],
             "video/mp4": ["mov", "mp4", "m4v", "3gp"],
         ]
+        // The TIFF container holds most camera RAW formats (NEF, ARW, CR2, ORF, DNG…),
+        // each with a name its converters insist on: a RAW keeps its own extension
+        // (review finding 6). Only a missing one is normalised.
+        if mime == "image/tiff" { return ext.isEmpty ? "tif" : ext }
         guard let mime, let fam = families[mime] else { return ext.isEmpty ? "bin" : ext }
         return fam.contains(ext) ? ext : fam[0] == "mov" ? "mp4" : fam[0]
     }
@@ -112,8 +116,10 @@ enum Act {
     /// where the file has none. `ModifyDate` is left alone — it means last modified.
     static func tags(isVideo: Bool, local: String?, offset: String?, zoneSource: String,
                      timeSource: String, lat: Double?, lon: Double?, placeSource: String,
-                     fileHasGPS: Bool, options: Options) -> [String: String] {
+                     fileHasGPS: Bool, options: Options, mime: String? = nil) -> [String: String] {
         var t: [String: String] = [:]
+        // GIF and WebP have no EXIF; their dates live in XMP alone (review finding 10).
+        let xmpOnly = mime == "image/gif" || mime == "image/webp"
         // A clock shown in UTC for want of a zone is not a local time: write no date.
         if let local, !timeSource.hasSuffix("shown in UTC"), !timeSource.hasPrefix("mtime") {
             let zoneRead = zoneSource == "tag" || zoneSource.hasPrefix("clock + ")
@@ -127,6 +133,10 @@ enum Act {
                     t["QuickTime:MediaCreateDate"] = local + off
                     t["Keys:CreationDate"] = local + off
                 }
+            } else if xmpOnly {
+                t["XMP-xmp:CreateDate"] = local + (off ?? "")
+                t["XMP-photoshop:DateCreated"] = local + (off ?? "")
+                t["XMP-exif:DateTimeOriginal"] = local + (off ?? "")
             } else {
                 t["EXIF:DateTimeOriginal"] = local
                 t["EXIF:CreateDate"] = local
@@ -140,11 +150,18 @@ enum Act {
                 }
             }
         }
-        if let lat, let lon, !fileHasGPS, placeSource != "none",
+        // A place the app worked out is never written on a file dated only by its
+        // copy date: there is no moment for it to belong to (review finding 2).
+        let placeRead = placeSource == "measured" || placeSource == "sidecar GPS"
+            || placeSource.hasPrefix("your rule: ") || placeSource == "you entered it" || placeSource == "you confirmed it"
+        if let lat, let lon, !fileHasGPS, placeSource != "none", placeRead || !Resolver.unreliableTime(timeSource),
            options.writePlaces || placeSource == "measured" || placeSource == "sidecar GPS"
                 || placeSource.hasPrefix("your rule: ") || placeSource == "you entered it" || placeSource == "you confirmed it" {
             if isVideo {
                 t["Keys:GPSCoordinates"] = String(format: "%.6f, %.6f, 0", lat, lon)
+            } else if xmpOnly {
+                t["XMP-exif:GPSLatitude"] = String(format: "%.7f%@", abs(lat), lat >= 0 ? "N" : "S")
+                t["XMP-exif:GPSLongitude"] = String(format: "%.7f%@", abs(lon), lon >= 0 ? "E" : "W")
             } else {
                 t["EXIF:GPSLatitude"] = String(format: "%.7f", abs(lat))
                 t["EXIF:GPSLatitudeRef"] = lat >= 0 ? "N" : "S"
@@ -225,6 +242,7 @@ enum Act {
     /// recorded is recognised by its hash, and half-written files are swept away.
     static func prepare(_ c: Catalog, root: String) {
         reconcile(c, root: root)
+        retire(c, root: root)
         let items = plan(c)
         try? c.transaction {
             try c.run("DELETE FROM output WHERE state != 'verified' OR root != '\(root.replacingOccurrences(of: "'", with: "''"))';")
@@ -237,6 +255,38 @@ enum Act {
                   .bind(5, i.target).bind(6, root).done(); st.reset()
             }
             st.finalize()
+        }
+    }
+
+    /// A verified row stands only while its file is still the copy to keep. After a
+    /// keeper change or a regroup the old canonical would otherwise stay on disk and
+    /// the new one be written beside it as `_2` (review finding 3). Such a file is
+    /// removed if it is still exactly as written, and its row goes; a file changed
+    /// since is left alone but its row goes too, so it is never counted. A row whose
+    /// file id now points at a different path — ids are reused after Clear — is
+    /// dropped outright (review finding 4).
+    static func retire(_ c: Catalog, root: String) {
+        try? c.transaction {
+            try c.run("""
+                DELETE FROM output WHERE NOT EXISTS
+                    (SELECT 1 FROM file f WHERE f.id = output.file_id AND f.path = output.source);
+                """)
+        }
+        var stale: [(Int, String, String?)] = []
+        if let st = try? c.prepare("""
+            SELECT o.file_id, o.target, o.written_sha FROM output o
+            WHERE o.root = ? AND o.state = 'verified'
+              AND NOT EXISTS (SELECT 1 FROM member m WHERE m.file_id = o.file_id AND m.role IN ('canonical','companion'));
+            """) {
+            st.bind(1, root)
+            while st.step() { stale.append((st.int(0), st.text(1) ?? "", st.text(2))) }
+            st.finalize()
+        }
+        let fm = FileManager.default
+        for (id, target, sha) in stale {
+            let path = (root as NSString).appendingPathComponent(target)
+            if let sha, Extractor.shaOfFile(path) == sha { try? fm.removeItem(atPath: path) }
+            try? c.transaction { let st = try c.prepare("DELETE FROM output WHERE file_id = ?;"); st.bind(1, id).done(); st.finalize() }
         }
     }
 
@@ -269,9 +319,12 @@ enum Act {
 
     /// Write everything not yet verified. Resumable: stop or crash at any point and
     /// run again; a half-written file is only ever a `.photomerge-partial`.
-    static func run(_ c: Catalog, root: String, options: Options = Options(), workers: Int,
+    static func run(_ c: Catalog, root givenRoot: String, options: Options = Options(), workers: Int,
                     stop: Ingest.Stop = Ingest.Stop(),
                     progress: @escaping (Int, Int) -> Void = { _, _ in }) throws -> Report {
+        // One spelling of the root — no trailing slash, no "..": relative paths are
+        // cut from it, and the manifest compares it as text (review finding 22).
+        let root = URL(fileURLWithPath: givenRoot).standardizedFileURL.path
         try check(c, root: root)
         guard ExifTool.locate() != nil else { throw Refusal.noWriter }
         let (need, free) = space(c, root: root)
@@ -280,14 +333,14 @@ enum Act {
 
         struct Job { let fileID: Int; let source: String; let target: String; let isVideo: Bool
                      let pixel: String?; let sha: String?; let frames: Data?; let duration: Double?
-                     let fileHasGPS: Bool
+                     let fileHasGPS: Bool; let mime: String?
                      let local: String?; let offset: String?; let zoneSource: String; let timeSource: String
                      let lat: Double?; let lon: Double?; let placeSource: String; let instant: Double? }
         var jobs: [Job] = []
         if let st = try? c.prepare("""
             SELECT o.file_id, o.source, o.target, f.kind, f.pixel_hash, f.sha256, f.frames, f.duration,
                    f.lat IS NOT NULL, r.local_time, r.utc_offset, COALESCE(r.zone_source,'none'),
-                   COALESCE(r.time_source,'none'), r.lat, r.lon, COALESCE(r.place_source,'none'), r.instant
+                   COALESCE(r.time_source,'none'), r.lat, r.lon, COALESCE(r.place_source,'none'), r.instant, f.mime
             FROM output o JOIN file f ON f.id = o.file_id
             LEFT JOIN resolution r ON r.cluster_id = o.cluster_id
             WHERE o.state = 'planned' ORDER BY o.target;
@@ -296,7 +349,7 @@ enum Act {
                 jobs.append(Job(fileID: st.int(0), source: st.text(1) ?? "", target: st.text(2) ?? "",
                                 isVideo: st.text(3) == "video", pixel: st.text(4), sha: st.text(5),
                                 frames: st.blob(6), duration: st.isNull(7) ? nil : st.double(7),
-                                fileHasGPS: st.int(8) != 0, local: st.text(9), offset: st.text(10),
+                                fileHasGPS: st.int(8) != 0, mime: st.text(17), local: st.text(9), offset: st.text(10),
                                 zoneSource: st.text(11) ?? "none", timeSource: st.text(12) ?? "none",
                                 lat: st.isNull(13) ? nil : st.double(13), lon: st.isNull(14) ? nil : st.double(14),
                                 placeSource: st.text(15) ?? "none", instant: st.isNull(16) ? nil : st.double(16)))
@@ -339,7 +392,7 @@ enum Act {
                 let t = decodable ? tags(isVideo: j.isVideo, local: j.local, offset: j.offset,
                                          zoneSource: j.zoneSource, timeSource: j.timeSource,
                                          lat: j.lat, lon: j.lon, placeSource: j.placeSource,
-                                         fileHasGPS: j.fileHasGPS, options: options) : [:]
+                                         fileHasGPS: j.fileHasGPS, options: options, mime: j.mime) : [:]
                 if !t.isEmpty {
                     guard let et else { fail("exiftool did not start"); continue }
                     do { try et.write(partial, t, extra: j.isVideo ? ["-api", "QuickTimeUTC=1"] : []) }
@@ -405,7 +458,7 @@ enum Act {
     /// Remove what was written — only files that are still exactly what was written.
     /// A file changed since (edited, re-tagged) is left alone and reported. The
     /// originals are never involved.
-    static func undo(_ c: Catalog, root: String) -> UndoReport {
+    static func undo(_ c: Catalog, root: String, progress: (Int, Int) -> Void = { _, _ in }) -> UndoReport {
         var r = UndoReport()
         var rows: [(Int, String, String?)] = []
         // `committing`: moved into place by a run that crashed before recording it
@@ -416,10 +469,11 @@ enum Act {
         }
         let fm = FileManager.default
         var dirs = Set<String>()
-        for (id, target, sha) in rows {
+        for (n, (id, target, sha)) in rows.enumerated() {
+            progress(n, rows.count)
             let path = (root as NSString).appendingPathComponent(target)
             guard fm.fileExists(atPath: path) else { r.missing += 1; forget(c, id); continue }
-            guard let data = fm.contents(atPath: path), Extractor.sha(data) == sha else { r.keptChanged += 1; continue }
+            guard Extractor.shaOfFile(path) == sha else { r.keptChanged += 1; continue }
             try? fm.removeItem(atPath: path)
             dirs.insert((path as NSString).deletingLastPathComponent)
             r.removed += 1; forget(c, id)

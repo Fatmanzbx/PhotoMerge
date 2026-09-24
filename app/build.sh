@@ -12,8 +12,11 @@ rm -rf build && mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 # (libSwiftUIMacros.dylib) ships with Xcode, not the Command Line Tools.
 if [ -d /Applications/Xcode.app ]; then
     export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+elif [ -d "$(xcode-select -p 2>/dev/null)/Platforms" ]; then
+    export DEVELOPER_DIR="$(xcode-select -p)"        # an Xcode installed elsewhere
 else
-    echo "error: Xcode is required (SwiftUI macro plugins are not in the CLT)." >&2
+    echo "error: Xcode is required (SwiftUI macro plugins are not in the Command Line Tools)." >&2
+    echo "       Install it from the App Store, or point xcode-select at it: sudo xcode-select -s /path/to/Xcode.app" >&2
     exit 1
 fi
 
