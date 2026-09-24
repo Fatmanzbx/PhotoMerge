@@ -187,6 +187,7 @@ struct TipBanner: View {
                 Text(text).font(.system(size: 18)).fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: D.Space.s)
                 Button { dismissed = true } label: { Image(systemName: "xmark").font(.system(size: 15)) }
+                    .accessibilityLabel("Dismiss this tip")
                     .buttonStyle(.borderless).help("Don't show this tip again")
             }
             .padding(.horizontal, D.Space.m).padding(.vertical, D.Space.s)

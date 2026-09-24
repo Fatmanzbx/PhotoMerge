@@ -89,7 +89,7 @@ func testCascade() {
     eq("tier B labels the method", r.groups[0].method, "same image")
 
     // Tier C respects the radius dial, and only merges what verification confirms
-    let near = [item(1, sha: "a", dhash: 0b0000), item(2, sha: "b", dhash: 0b0011)]
+    let near = [item(1, sha: "a", dhash: 0b0000, thumb: detailed(5)), item(2, sha: "b", dhash: 0b0011, thumb: detailed(5))]
     eq("radius 0 keeps distance-2 apart", Clusterer.cluster(near, radius: 0).groups.count, 2)
     eq("radius 2 joins them when pixels agree", Clusterer.cluster(near, radius: 2).groups.count, 1)
 
@@ -111,8 +111,8 @@ func testCascade() {
 
     // A tone grade must never be merged away silently — it is a different picture
     // to look at, however identical its structure (INHERITED §2.22).
-    let graded = [item(1, sha: "a", dhash: 0b0000, thumb: flat(100)),
-                  item(2, sha: "b", dhash: 0b0000, thumb: flat(112))]
+    let graded = [item(1, sha: "a", dhash: 0b0000, thumb: detailed(6)),
+                  item(2, sha: "b", dhash: 0b0000, thumb: detailed(6).map { $0 &+ 12 })]
     v = Clusterer.cluster(graded, radius: 4)
     eq("a colour grade stays separate", v.groups.count, 2)
     eq("and is flagged for review", v.needsReview > 0, true)
@@ -152,9 +152,18 @@ func testCascade() {
     eq("copies sharing an instant still merge", bv.groups.count, 1)
 
     // a missing capture time must not block a merge
-    let oneUndated = [item(1, sha: "a", dhash: 0b0000, thumb: flat(100), capturedAt: "2025:07:04 22:23:40"),
-                      item(2, sha: "b", dhash: 0b0001, thumb: flat(100), capturedAt: nil)]
+    let oneUndated = [item(1, sha: "a", dhash: 0b0000, thumb: detailed(7), capturedAt: "2025:07:04 22:23:40"),
+                      item(2, sha: "b", dhash: 0b0001, thumb: detailed(7), capturedAt: nil)]
     eq("missing date falls through to pixels", Clusterer.cluster(oneUndated, radius: 4).groups.count, 1)
+
+    // The guards hold across tiers: two dated black frames must not be chained
+    // together through an undated blank frame that tier C would join to each.
+    let blanks = [item(1, sha: "a", pixel: "p", dhash: 0b0000, capturedAt: "2021:01:01 10:00:00"),
+                  item(2, sha: "b", pixel: "q", dhash: 0b0001, capturedAt: nil),
+                  item(3, sha: "c", pixel: "p", dhash: 0b0000, capturedAt: "2021:01:02 10:00:00")]
+    let bl = Clusterer.cluster(blanks, radius: 4)
+    eq("blank frames never chain two moments together", bl.groups.count, 3)
+    check("and a blank pair is unverifiable, not an edit to review", bl.needsReview == 0 && bl.unverifiable > 0)
 
     // MAE itself
     eq("mae of identical thumbs", Clusterer.mae(flat(100), flat(100)), 0.0)

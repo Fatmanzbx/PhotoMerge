@@ -514,8 +514,9 @@ enum Resolver {
                     < ($1.folder == nil ? 1 : 0, ($1.dayTo ?? Int.max) - ($1.dayFrom ?? 0))
             }
             for i in out.indices where out[i].placeSource == "none" && !utcOnly.contains(i) {
-                let day = dayNumber(out[i].localTime)
-                guard let rule = ordered.first(where: { $0.matches(folder: albumOf[i], day: day) }) else { continue }
+                // a copy date matches no range: only a folder rule may place such a file
+                let day = unreliableTime(out[i].timeSource) ? nil : dayNumber(out[i].localTime)
+                guard let rule = ordered.first(where: { ($0.folder != nil || day != nil) && $0.matches(folder: albumOf[i], day: day) }) else { continue }
                 out[i].lat = rule.lat; out[i].lon = rule.lon
                 out[i].placeSource = "your rule: " + rule.label
                 stats.placeFromRule += 1

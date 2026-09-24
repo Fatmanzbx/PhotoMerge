@@ -27,7 +27,6 @@ struct GuidedView: View {
             Divider()
             StatusBar()
         }
-        .sheet(item: $engine.sheet) { s in SheetHost(sheet: s) }
     }
 }
 
@@ -590,45 +589,5 @@ struct SaveStep: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-    }
-}
-
-// MARK: - sheets
-
-struct SheetHost: View {
-    @EnvironmentObject var engine: Engine
-    let sheet: Engine.Sheet
-
-    private var title: String {
-        switch sheet {
-        case .duplicates: return "Duplicate copies"
-        case .edited:     return "Edited copies"
-        case .wrongTime:  return "Photos showing the wrong time"
-        case .unclearDay: return "Which time zone was this day?"
-        case .missing:    return "Fill in dates and places"
-        }
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text(title).font(.system(size: 26, weight: .semibold))
-                Spacer()
-                Button("Done") { engine.sheet = nil }.keyboardShortcut(.defaultAction)
-            }
-            .padding(.horizontal, D.Space.l).padding(.vertical, D.Space.m)
-            Divider()
-            Group {
-                switch sheet {
-                case .duplicates: GroupsView()
-                case .edited:     ReviewList()
-                case .wrongTime:  ScrollView { ChecksSection().padding(20) }
-                case .unclearDay: ScrollView { BallotsSection().padding(20) }
-                case .missing:    FillView()
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .frame(minWidth: 1000, idealWidth: 1100, minHeight: 640, idealHeight: 760)
     }
 }

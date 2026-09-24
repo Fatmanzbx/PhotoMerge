@@ -1,5 +1,8 @@
 # PhotoMerge 1.0.0 — pre-release code review
 
+> A second round, reviewing the 1.0.1 fixes (commit 6029aeb), is appended at the end of
+> this file under **Round 2 — review of 1.0.1**.
+
 Date: 2026-09-23. Scope: everything in this repository, with the Mac app (`app/`) reviewed in
 full and the legacy Python CLI (`cli/`) reviewed lightly. Read-only: nothing in the repository
 was modified. Running the build regenerated the gitignored `app/build/` folder.
@@ -188,3 +191,198 @@ wrote and verified; the GIF failed with "the date did not take: read back nothin
 
 **exp5** — `actc` with a destination ending in `/`. Result: `output.target` recorded as
 `020/05/20200501_100000.jpg` while the file sits at `2020/05/…`.
+
+---
+---
+
+# Round 2 — review of 1.0.1
+
+Date: 2026-09-24. Scope: commit 6029aeb ("1.0.1: close the review's correctness findings"),
+21 files, against the same ground rules. Read-only; nothing in the repository was modified.
+
+What was run:
+
+- `app/build.sh` (passes; about 37 distinct warnings, up from about 30), `app/test.sh`
+  (450/450, 28 new tests), the known-answer suite (20/20)
+- `Tests/crash_test.sh`, 3 kills and 1 round, from two spellings of the same scratch
+  directory: **passes from `/tmp/...`, fails 6 checks from `/private/tmp/...`**. Both were
+  green on 1.0.0.
+- The round-one experiments repeated on the new binary (exp1, exp2, exp3, exp5), plus new
+  ones: a keeper change under both path spellings (exp A), a source rename and rescan
+  (exp B), a date-range place rule against a copy-dated file, a `standardizedFileURL` probe,
+  and a Takeout-style folder with `.json`, `.aae` and `.xmp` companions.
+
+Every finding is marked **VERIFIED** or **SUSPECTED** as before. New findings are numbered
+R1–R13; round-one findings keep their numbers.
+
+---
+
+## 1. Project summary
+
+Unchanged in shape from round one. The 1.0.1 commit adds `CHANGELOG.md`, an `Act.retire`
+step that removes a superseded kept copy from the clean library, AUTOINCREMENT on newly
+created catalogs, capture-instant, shape and blank-frame guards on tier B, an
+`unreliableTime` gate on same-day and neighbour inference in the resolver, a catalog
+recovery screen, off-main-thread Tidy and Undo with streamed hashing, per-source
+"unrecognised" counts, a "Keep the clock" correction beside "Correct", XMP-only tags for
+GIF and WebP, RAW extensions preserved, root standardisation in `Act.run`, spherical
+centres, local-zone display of file dates, and rewritten install docs.
+
+---
+
+## 2. Top 5 issues
+
+1. **Finding 1 is not closed in effect.** Tier B now refuses to join two black frames from
+   different days, but tier C joins each of them to an undated blank GIF, and union-find
+   chains them together anyway. exp1 still produces one "same image" group of `black1`,
+   `black2` and the GIF. Blank frames also generate "edited copy" review pairs against every
+   other flat frame.
+2. **The trailing-slash fix introduced an unstable manifest key.** `Act.run` standardises
+   the root with `standardizedFileURL`, which strips `/private` only when the path already
+   exists. The first write therefore stores one root and every later write another. In that
+   state `prepare` discards every verified row, the whole library is rewritten as `_2`, and
+   Undo removes nothing. The project's own crash suite fails with 147 orphan files when run
+   from `/private/tmp`.
+3. **`Act.retire` orphans files after a source rename or rescan.** A verified row whose file
+   id or path changed is deleted outright while its file stays on disk. The photo is written
+   again as `_2`, and Undo can no longer remove the first copy. In 1.0.0 the stale row at
+   least kept Undo able to clean up.
+4. **Copy-dated files still receive places through date-range rules, and those places are
+   written.** `unreliableTime` gates same-day and neighbour inference but not rule
+   matching. A "2020" rule placed an mtime-only file at 51.5, -0.12 and Act wrote it into
+   the clean copy.
+5. **The "not recognised" count includes Takeout sidecars.** `.json`, `.aae` and `.xmp`
+   are counted as "not photos or videos the app reads", so a Google Takeout export will
+   show thousands of alarming leftovers on the primary use case, although the sidecars were
+   read as evidence.
+
+---
+
+## 3. Findings table
+
+Open items only, sorted by severity. Closed items follow the table with how each was
+verified.
+
+| # | Severity | Category | Location | Problem | Why it matters | Suggested fix | Effort | Verified? |
+|---|---|---|---|---|---|---|---|---|
+| R1 | Critical | Correctness | `app/Sources/Clusterer.swift`, tier C candidate loop; `sameShape` and `featureless` are called only from tier B | Tier C has no shape or blank-frame guard. Pair table from exp1 at radius 4: `black1–gif merged`, `gif–black2 merged`, `black1–black2 burst`. Union-find joins all three; the cluster method still reads "same image". Blank frames also yield `variant` pairs against a solid blue PNG. | The one unrecoverable outcome remains reachable through an undated blank frame; the review queue fills with meaningless pairs. | Apply `sameShape` and `featureless` in tier C before `verify`; treat a featureless pair as unverifiable unless the capture instants match; add a test with an undated blank frame between two dated ones at radius 4. | S | VERIFIED (exp1 pair table) |
+| R2 | High | Correctness / Resilience | `Act.swift` `run` (root standardisation), `prepare` root filter; `Engine.swift:585, 651` | `standardizedFileURL` strips `/private` only if the path exists (probe: `<SCR>/std/exists → /tmp/...`, `<SCR>/std/does-not-exist-yet → /private/tmp/...`). The stored `output.root` differs between the first and later writes under `/private/tmp`, `/private/var`, `/private/etc`. `prepare` then deletes every verified row, everything is rewritten as `_2`, and `Act.undo` and `writtenCount` still use the raw root and match nothing. Crash suite: "147 files on disk the manifest does not know", "451 files left after undo", "304 manifest rows left after undo". | The resumable-manifest safety mechanism silently fails for any affected destination, and the regression suite now depends on where it is run. Exposure through NSOpenPanel is low; the key must still be stable. | Standardise once, in one place (`Engine.chooseDestination` or an `Act.canonicalRoot`), with a function that does not depend on filesystem state, and use that value wherever `output.root` is written or compared. Run the crash suite from a `/private` path. | S | VERIFIED (probe + crash suite) |
+| R3 | High | Correctness | `Act.swift` `retire`, first `DELETE` | Rows whose file id or path no longer matches are dropped without touching their file. After a source rename and rescan (exp B, stable root) the photo is written again as `_2`; Undo removed 1 of 2 and left the first copy. | Orphaned copies in the "clean" library that the app can no longer account for. Worse than 1.0.0 for Undo. | Before dropping a row, re-attach it to the file that now carries the same sha256, or remove the written file if it still matches `written_sha`; only then delete. | M | VERIFIED (exp B) |
+| R4 | Medium | Correctness | `Resolver.swift` step 2c (rules loop has no `unreliableTime` gate); `Act.tags` `placeRead` includes `your rule:` | A date-range rule matches the copy date of an mtime-only file and the resulting GPS is written. Driver + `actc`: `noexif.jpg` → `your rule: test rule`, written GPS 51.5, -0.12. | Same class as finding 2: invented GPS in a file whose only date is a copy date. | Skip day-range rule matching when `unreliableTime`; folder rules may stay, they do not depend on the date. | S | VERIFIED |
+| R5 | Medium | UX | `Ingest.swift` unrecognised counting; `Views.swift` SourceCard help text | Every file the sniff rejects counts, including `.json` sidecars, `.aae`, `.xmp`. exp1: "json ×2, avi ×1, aae ×1, xmp ×1". A Takeout export will report roughly one "not a photo or video" per photo. | The new warning cries wolf on the primary use case and buries the real AVI/MKV signal. | Exclude known companion files (json, aae, xmp, txt, ini, db) from the count, or list them separately as "sidecars read". | S | VERIFIED (exp1) |
+| R6 | Medium | Correctness | `Engine.removeAll` (now wipes `output`); `Act.prepare` | After Clear and re-add, a write to the same destination has no manifest and writes every file again as `_2`. Rerunning `known` into an existing folder produced 13 files for 6 photos. | Clear is presented as a safe reset; combined with a reused destination it doubles the library. | Keep a copy of the manifest in the destination root and reconcile against it, or refuse a non-empty destination the manifest does not know. | M | VERIFIED (exp1 rerun) |
+| R7 | Medium | Correctness | `Catalog.swift:39` (`CREATE TABLE IF NOT EXISTS`) | AUTOINCREMENT applies only to catalogs created by 1.0.1. Every 1.0.0 catalog keeps `INTEGER PRIMARY KEY` and reuses ids (`sqlite_master` of a 1.0.0 catalog confirms). Mitigated by the path checks in `retire` and `Tidy.plan`. | The changelog says so, but the fix does not reach existing users. | Rebuild `file` with AUTOINCREMENT in `migrate` (copy, drop, rename) inside one transaction, behind a schema version row. | M | VERIFIED |
+| R8 | Medium | Regression risk | `Act.tags` `xmpOnly` includes `image/webp` | WebP can carry EXIF and did in 1.0.0 (round-one exp3 read back `DateTimeOriginal`). It now gets XMP only. Whether Photos and ImageIO read XMP dates from WebP is unconfirmed; `sips` reports no creation date for either variant, `mdimport -t` printed nothing. | A date Photos ignores is a date lost on import. | Keep EXIF for WebP; XMP-only for GIF alone. Confirm by importing one written WebP into Photos. | S | SUSPECTED |
+| R9 | Medium | Concurrency | `Engine.swift` detached readers on the one connection | Unchanged from finding 14; acknowledged in the changelog. | Transient wrong numbers during a regroup. | Read-only connection for the UI. | M | SUSPECTED |
+| R10 | Low | Docs accuracy | `CHANGELOG.md`; `app/test.sh:5, 26` | Changelog: "build and test scripts find Xcode via xcode-select"; `test.sh` still hardcodes `/Applications/Xcode.app` and the miniforge python. "Icon-only buttons have VoiceOver labels": two of three (the tip-banner close button in `HelpView.swift:189` has none). | A changelog that overstates fixes erodes the trust the docs work hard for. | Fix `test.sh` or correct the changelog; label the close button. | S | VERIFIED |
+| R11 | Low | Code quality | `Engine.swift` `perform`, `performSecondary`, `cards`; `Guide.Card` action strings; `Sniff.Kind.other` | No callers for the card actions; `Kind.other` still never produced. The "Correct all" primary action from finding 13 exists only in this dead code. | Misleads the next reader about what the UI does. | Delete or wire up. | S | VERIFIED (grep) |
+| R12 | Low | Build | build log | Distinct warnings rose from about 30 to about 37 (new detached tasks capture `self`); deprecated AVFoundation calls unchanged. Acknowledged. | Same as finding 19. | Same as finding 19. | M | VERIFIED |
+| R13 | Low | Correctness | `Engine.putBack`, `Engine.undoWrite` guards on `task == nil` | While the rescan started by Tidy is still running, ⌘Z on "Move duplicates to the Trash" silently does nothing. Pre-existing. | Undo appears broken for a few seconds after Tidy. | Queue the undo behind the running task, as `restore` already does. | S | VERIFIED (trace) |
+| — | — | Open from round one, unchanged | 14, 16 (partial: denied folders detected, Photos path still constructed, no usage string), 17 (partial: gazetteer only), 19, 20, 23, 24, 29, 32 | See the round-one table above. | | | | |
+
+### Closed since round one, and how it was checked
+
+- **2** (same-day and neighbour inference from copy dates): `noexif.jpg` resolves with no
+  place and no zone; the written copy carries no GPS. VERIFIED exp1. Gap remains for rules,
+  see R4.
+- **3** (manifest follows a keeper change): one file, no `_2`, under a stable root.
+  VERIFIED exp A. Fails under an unstable root, see R2; orphans on rename, see R3.
+- **5** (silent skips): AVI counted on the source card. VERIFIED exp1. Noise, see R5.
+- **6** (RAW extension): `Undated/shot.nef`. VERIFIED exp1.
+- **7** (launch crash): guarded; recovery view with "Put it aside and start again".
+  VERIFIED by trace.
+- **8** (main-thread file work): Tidy, put back and undo run detached with progress;
+  streamed hashing; kept copy hashed once per group. VERIFIED by trace.
+- **9** (install docs): Sequoia path documented. VERIFIED docs.
+- **10** (GIF): written with XMP dates, no failure. VERIFIED exp3.
+- **11** (nested Photos library): package skipped when the source is its parent. VERIFIED
+  exp1.
+- **12** (write settings in the undo snapshot), **30** (snapshot errors), **31**
+  (antimeridian), **21** (file date shown in local time), **18** (300 of N), **27** (doc
+  numbers), **28** (Intel labelled), **22** (trailing slash, in `run` only — see R2), **25**
+  partly (`hasColumn` and `tierC += 0` removed). VERIFIED by diff and tests.
+- **13** (correction model): "Keep the clock" added beside "Correct" in the checks
+  section, with text explaining the two readings. VERIFIED by diff. Risk reduced, not
+  removed.
+
+---
+
+## 4. Quick wins
+
+- Add `sameShape` and `featureless` to the tier C candidate loop before `verify`. Closes R1.
+- Standardise the destination once, in `chooseDestination`, with a function that does not
+  depend on whether the path exists, and use that string in `run`, `undo`, `space`,
+  `check`, `retire` and `writtenCount`. Closes R2.
+- Gate day-range rules on `!unreliableTime`. Closes R4.
+- Exclude sidecar extensions from the unrecognised count. Closes R5.
+- Restore EXIF for WebP. Closes R8.
+- Fix the `test.sh` paths and the two changelog sentences; label the tip-banner close
+  button. Closes R10.
+- Delete `perform`, `performSecondary`, `cards` and `Kind.other`, or use them. Closes R11.
+
+---
+
+## 5. Structural concerns
+
+- **The manifest is keyed on a string.** R2 and R3 both come from `output` rows being
+  identified by `(root text, file_id)`. Key rows by the source file's sha256 plus a
+  normalised root, and treat `file_id` as a cache. A rescan then re-attaches rows instead of
+  orphaning them, and the root is compared as one normalised value in one place.
+- **Guards live in one tier.** The burst, shape and blank-frame guards now exist as
+  functions but are consulted by tier B only. Put them in one `compatible(a, b)` predicate
+  that every tier calls, and test the transitive case explicitly.
+- **The crash suite should run from more than one path.** It caught R2 immediately once run
+  from `/private/tmp`. Add a second scratch location to `crash_test.sh`, and run it before
+  each release.
+- Round-one concerns still stand: a read-only connection for the UI, one error channel,
+  notarization.
+
+---
+
+## 6. What could not be assessed
+
+- As in round one: the running UI, Gatekeeper on a clean machine, TCC behaviour, the Intel
+  slice, behaviour at 100k+ files.
+- WebP XMP readability in Photos (R8): `mdimport` and `sips` gave no answer either way.
+- Whether NSOpenPanel can return a `/private/...` or otherwise symlinked destination on a
+  real machine. If not, R2's user exposure is limited to the crash suite and to anyone
+  scripting the engine; the fix is still warranted because the manifest key must not depend
+  on filesystem state.
+
+---
+
+## Appendix — round-two experiment details
+
+**exp1 rerun** — same library as round one plus `A.jpg.supplemental-metadata.json`,
+`B.jpg.supplemental-metadata.json`, `A.xmp`, `IMG_0001.AAE`. Results: 8 files scanned
+(AVI and companions counted as "json ×2, avi ×1, aae ×1, xmp ×1"); nested library skipped;
+`black1`, `black2` and the GIF still one cluster via tier C (`pair` outcomes above);
+`noexif.jpg` with no place or zone and no GPS in its written copy; `shot.NEF` written as
+`Undated/shot.nef`. Rerunning into the existing `out` folder without clearing it produced
+`_2` copies of every file (R6).
+
+**Rule test** — a headless driver compiled from the engine sources added a place rule for
+2020-01-01…2020-12-31 at 51.5, -0.12 and regrouped exp1's catalog. `noexif.jpg` resolved to
+`your rule: test rule`; `actc` into a fresh folder wrote GPS 51.5, -0.12 into
+`Undated/noexif.jpg` (R4).
+
+**exp A** — `prep` + `actc` on one photo with a byte-identical backup, roles swapped in
+`member`, `actc` again. From `/private/tmp/...`: `already 0`, old file kept, `_2` written.
+From `/tmp/...`: one file, no `_2` (finding 3 closed under a stable root).
+
+**exp B** — as exp A, then `A.jpg` renamed on disk and in the catalog with a new id (as a
+rescan does), `actc`, `undoc`. Result: `_2` written; undo removed 1 of 2; the first copy
+left on disk (R3).
+
+**exp5 rerun** — `actc` with a trailing-slash root: `output.root` now stored standardised;
+`undoc` with the same trailing-slash spelling removed 0 (R2, raw root in `undo`).
+
+**Standardisation probe** — a two-line Swift program printing
+`URL(fileURLWithPath:).standardizedFileURL.path`: an existing `/private/tmp/...` path came
+back as `/tmp/...`, a not-yet-existing sibling kept `/private` (R2).
+
+**Crash suite** — `Tests/crash_test.sh <dir> 3 1` from `/private/tmp/...`: 6 checks fail
+(147 orphans, undo removes 0). From `/tmp/...`: all pass (R2).
+
+**exp3 rerun** — GIF and WebP both written; `exiftool -G1 -a` shows `XMP-exif:DateTimeOriginal`
+and `XMP-xmp:CreateDate` only, no EXIF, on both (10 closed; R8).

@@ -162,6 +162,18 @@ enum Clusterer {
         return ta != tb
     }
 
+    /// Why two items can never be one photograph, whatever their pixels say — or nil
+    /// when nothing rules it out. Every tier asks this before it joins anything.
+    static func incompatible(_ a: Item, _ b: Item) -> Pair.Outcome? {
+        if differentMoments(a, b) { return .burst }
+        if !sameShape(a, b) { return .rejected }
+        // two blank frames agree on every pixel and prove nothing; only a shared
+        // capture instant can say they are one photograph
+        if let t = a.thumb, featureless(t), a.capturedAt == nil || b.capturedAt == nil { return .unverifiable }
+        if let t = b.thumb, featureless(t), a.capturedAt == nil || b.capturedAt == nil { return .unverifiable }
+        return nil
+    }
+
     /// Two copies of one photograph keep its proportions (a rotation is normalised
     /// before hashing). A 4:3 frame and a square one are not the same image, whatever
     /// a square grid says. Unknown dimensions cannot object.
@@ -223,6 +235,9 @@ enum Clusterer {
         var needsReview = 0       // flat but not identical — probably an edit
         var unverifiable = 0      // candidates with no thumb on one side
         var longestChain = 0      // the number that matters for radius safety
+        mutating func count(_ why: Pair.Outcome) {
+            switch why { case .burst: separated += 1; case .rejected: rejected += 1; default: unverifiable += 1 }
+        }
     }
 
     /// Most-certain tier first. Each tier only ever *adds* unions, so a later,
@@ -256,13 +271,7 @@ enum Clusterer {
                 var joined = false
                 for j in js {
                     let other = items[j]
-                    if differentMoments(it, other) { r.separated += 1; continue }
-                    if !sameShape(it, other) { r.rejected += 1; continue }
-                    // two blank frames agree on every pixel and prove nothing; only a
-                    // shared capture instant can say they are one photograph
-                    if let t = it.thumb, featureless(t), it.capturedAt == nil || other.capturedAt == nil {
-                        r.unverifiable += 1; continue
-                    }
+                    if let why = incompatible(it, other) { r.count(why); continue }
                     ds.union(j, i); joined = true; break
                 }
                 if joined { r.tierB += 1 }
@@ -290,7 +299,11 @@ enum Clusterer {
                         if said { ds.union(i, j); record(.youSame, m) } else { record(.youDifferent, m) }
                         continue
                     }
-                    if differentMoments(it, other) { r.separated += 1; record(.burst, m); continue }
+                    // The same guards as tier B, before any pixel comparison. Union-find
+                    // is transitive: a guard that one tier skips is no guard at all — two
+                    // dated black frames stayed apart in tier B and were joined here, each
+                    // to an undated blank GIF (review round 2, R1).
+                    if let why = incompatible(it, other) { r.count(why); record(why, m); continue }
                     guard let ta = it.thumb, let tb = other.thumb else {
                         r.unverifiable += 1; record(.unverifiable); continue
                     }

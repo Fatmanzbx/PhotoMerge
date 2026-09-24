@@ -46,6 +46,9 @@ enum Ingest {
 
     // MARK: scan
 
+    /// Files that travel with photographs and are not themselves photographs.
+    static let companionExtensions: Set<String> = ["json", "aae", "xmp", "txt", "ini", "db", "plist", "html", "csv", "md", "log", "url"]
+
     struct ScanReport {
         var seen = 0, added = 0, changed = 0, removed = 0, excluded = 0
         /// Sources whose folder is missing — an unplugged drive. Their files are
@@ -157,8 +160,12 @@ enum Ingest {
                     } else {
                         guard let kind = Sniff.sniff(u) else {              // magic bytes, not extension
                             let ext = u.pathExtension.lowercased()
-                            skipped[ext.isEmpty ? "(no extension)" : ext, default: 0] += 1
-                            r.unrecognised += 1
+                            // a photo's companions — Takeout .json, Apple .aae, .xmp — are
+                            // read as evidence, not photographs; they are not "unrecognised"
+                            if !Ingest.companionExtensions.contains(ext) {
+                                skipped[ext.isEmpty ? "(no extension)" : ext, default: 0] += 1
+                                r.unrecognised += 1
+                            }
                             continue
                         }
                         seen.insert(path); r.seen += 1; r.added += 1

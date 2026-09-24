@@ -4,7 +4,7 @@ import Foundation
 /// `ftyp` brands are what separate HEIC from MP4: both are BMFF containers, so
 /// container detection alone is not enough.
 enum Sniff {
-    enum Kind: String { case image, video, other }
+    enum Kind: String { case image, video }
 
     struct Result { let kind: Kind; let mime: String }
 

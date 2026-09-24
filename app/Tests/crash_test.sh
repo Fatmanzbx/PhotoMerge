@@ -78,6 +78,15 @@ echo "clean library, killed right after a file is moved into place"
 for n in 1 7 40; do inject act.moved $n $T actc "$CAT" "$OUT"; verdict $CHECK output "$OUT"; $T undoc "$CAT" "$OUT" >/dev/null; done
 verdict $CHECK undone "$OUT"
 
+# The same folder under its other spelling: /tmp is a link to /private/tmp, and a
+# manifest keyed on the path as typed once matched nothing from the other side
+# (review round 2, R2). One write-and-undo round from there must agree.
+if [[ "$W" != /private/* ]] && [ -d "/private$W" ]; then
+    echo "clean library from the /private spelling of the same folder"
+    $T actc "$CAT" "/private$W/out" > "$W/run.log" 2>&1; echo "  $(tail -1 "$W/run.log")"; verdict $CHECK output "$OUT"
+    $T undoc "$CAT" "/private$W/out" > "$W/run.log" 2>&1; echo "  $(tail -1 "$W/run.log")"; verdict $CHECK undone "$OUT"
+fi
+
 echo "tidy, random kills"
 DUR=0.05 killer tidy $T tidyc "$CAT" "$TRASH";      verdict $CHECK tidied "$TRASH"
 DUR=0.05 killer restore $T restorec "$CAT" "$TRASH";         verdict $CHECK restored "$TRASH"

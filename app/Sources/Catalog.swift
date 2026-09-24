@@ -147,6 +147,7 @@ final class Catalog {
             "ALTER TABLE source ADD COLUMN unrecognised INTEGER NOT NULL DEFAULT 0;",
             "ALTER TABLE source ADD COLUMN unrecognised_kinds TEXT;",
             "ALTER TABLE zone_fix ADD COLUMN keep_clock INTEGER NOT NULL DEFAULT 0;",
+            "ALTER TABLE output ADD COLUMN source_sha TEXT;",
             "CREATE INDEX IF NOT EXISTS file_content ON file(content_id);",
             """
             CREATE TABLE IF NOT EXISTS zone_pick(

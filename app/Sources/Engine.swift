@@ -401,7 +401,6 @@ final class Engine: ObservableObject {
     /// Jump from anywhere to the chain for one asset.
     func inspect(_ clusterID: Int) {
         decisionSelection = clusterID
-        sheet = nil
         advanced = true
         tab = .decisions
     }
@@ -571,7 +570,7 @@ final class Engine: ObservableObject {
 
     func loadAct() {
         guard let c = catalog else { return }
-        outputRoot = c.setting("output_root")
+        outputRoot = c.setting("output_root").map(Act.canonicalRoot)
         if let j = c.setting("act_options"), let o = try? JSONDecoder().decode(Act.Options.self, from: Data(j.utf8)) {
             actOptions = o
         }
@@ -611,8 +610,8 @@ final class Engine: ObservableObject {
         panel.prompt = "Choose"
         panel.message = "Choose an empty folder for the merged copy. It must not be inside a folder you are analysing."
         guard panel.runModal() == .OK, let url = panel.url, let c = catalog else { return }
-        outputRoot = url.path
-        c.setSetting("output_root", url.path)
+        outputRoot = Act.canonicalRoot(url.path)
+        c.setSetting("output_root", outputRoot!)
         refreshActSummary()
     }
 
@@ -648,7 +647,9 @@ final class Engine: ObservableObject {
 
     /// Remove the merged copy — only files still exactly as written.
     func undoWrite() {
-        guard let c = catalog, let root = outputRoot, task == nil else { return }
+        guard let c = catalog, let root = outputRoot else { return }
+        // a run still going (the rescan Tidy starts, say) is waited for, not ignored
+        if task != nil { Task { @MainActor in await self.whenIdle(); self.undoWrite() }; return }
         progress = Progress(stage: "removing", running: true)
         task = Task.detached(priority: .userInitiated) { [weak self] in
             let u = Act.undo(c, root: root) { d, t in Task { @MainActor in self?.progress.done = d; self?.progress.total = t } }
@@ -702,6 +703,11 @@ final class Engine: ObservableObject {
         }
     }
 
+    /// Until the running task, if any, has finished (review round 2, R13).
+    func whenIdle() async {
+        while task != nil { try? await Task.sleep(nanoseconds: 200_000_000) }
+    }
+
     // MARK: tidy in place
 
     @Published var tidyPlan = Tidy.Plan()
@@ -738,7 +744,8 @@ final class Engine: ObservableObject {
     }
 
     func putBack() {
-        guard let c = catalog, task == nil else { return }
+        guard let c = catalog else { return }
+        if task != nil { Task { @MainActor in await self.whenIdle(); self.putBack() }; return }
         progress = Progress(stage: "restoring", running: true)
         task = Task.detached(priority: .userInitiated) { [weak self] in
             let r = Tidy.restore(c)
@@ -768,9 +775,6 @@ final class Engine: ObservableObject {
         if let v = ProcessInfo.processInfo.environment["PM_ADVANCED"] { return v == "1" }
         return UserDefaults.standard.bool(forKey: "advanced")
     }
-    enum Sheet: String, Identifiable { case duplicates, edited, wrongTime, unclearDay, missing
-        var id: String { rawValue } }
-    @Published var sheet: Sheet?
     @Published var acks: [String: String] = [:]
     @Published var missing = (either: 0, date: 0, place: 0)
 
@@ -820,27 +824,6 @@ final class Engine: ObservableObject {
             st.bind(1, "ack." + card.kind.rawValue).done(); st.finalize()
         }
         acks[card.kind.rawValue] = nil
-    }
-
-    /// The card's one obvious action.
-    func perform(_ card: Guide.Card) {
-        switch card.kind {
-        case .wrongTime:  correct(audit)
-        case .duplicates, .unreadable, .unavailable: acknowledge(card)
-        case .edited:     sheet = .edited
-        case .unclearDay: sheet = .unclearDay
-        case .missing:    sheet = .missing
-        }
-    }
-
-    func performSecondary(_ card: Guide.Card) {
-        switch card.kind {
-        case .wrongTime:  sheet = .wrongTime
-        case .duplicates: sheet = .duplicates
-        case .edited:     keepAllSeparate()
-        case .unclearDay, .missing: acknowledge(card)
-        default: break
-        }
     }
 
     /// "Keep them all": say *different* to every edited copy still undecided.

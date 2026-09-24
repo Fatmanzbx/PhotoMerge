@@ -118,8 +118,9 @@ enum Act {
                      timeSource: String, lat: Double?, lon: Double?, placeSource: String,
                      fileHasGPS: Bool, options: Options, mime: String? = nil) -> [String: String] {
         var t: [String: String] = [:]
-        // GIF and WebP have no EXIF; their dates live in XMP alone (review finding 10).
-        let xmpOnly = mime == "image/gif" || mime == "image/webp"
+        // GIF has no EXIF; its dates live in XMP alone (review finding 10). WebP can
+        // carry EXIF and keeps it (round 2, R8).
+        let xmpOnly = mime == "image/gif"
         // A clock shown in UTC for want of a zone is not a local time: write no date.
         if let local, !timeSource.hasSuffix("shown in UTC"), !timeSource.hasPrefix("mtime") {
             let zoneRead = zoneSource == "tag" || zoneSource.hasPrefix("clock + ")
@@ -175,7 +176,7 @@ enum Act {
     // MARK: run
 
     enum Refusal: Error, CustomStringConvertible {
-        case insideSource(String), containsSource(String), noWriter, noSpace(need: Int, free: Int)
+        case insideSource(String), containsSource(String), noWriter, noSpace(need: Int, free: Int), notEmpty(String)
         var description: String {
             switch self {
             case .noSpace(let need, let free):
@@ -184,6 +185,7 @@ enum Act {
             case .insideSource(let s): return "The destination is inside a source (\(s)). The copy would be read back as more photographs."
             case .containsSource(let s): return "A source (\(s)) is inside the destination. Choose an empty folder elsewhere."
             case .noWriter: return "exiftool is missing, so dates and places cannot be written losslessly."
+            case .notEmpty(let r): return "\((r as NSString).lastPathComponent) already has files in it that PhotoMerge did not write. Choose an empty folder, so the library stays one file per photograph."
             }
         }
     }
@@ -201,13 +203,36 @@ enum Act {
         return (final as NSString).deletingPathExtension + partialMarker + (ext.isEmpty ? "" : "." + ext)
     }
 
-    /// The destination may be neither inside a source nor contain one.
+    /// One spelling of a path, decided by its text alone: no trailing slash, no "."
+    /// or "..", nothing that depends on whether the path exists yet.
+    /// `standardizedFileURL` strips "/private" only for paths that already exist,
+    /// so the first write stored one root and every later write another, and the
+    /// manifest matched nothing (review round 2, R2). This is the only function
+    /// allowed to spell a root for `output.root`.
+    static func canonicalRoot(_ p: String) -> String {
+        var parts: [String] = []
+        for c in p.split(separator: "/", omittingEmptySubsequences: true) {
+            if c == "." { continue }
+            if c == ".." { _ = parts.popLast(); continue }
+            parts.append(String(c))
+        }
+        return "/" + parts.joined(separator: "/")
+    }
+
+    /// The destination may be neither inside a source nor contain one — and may not
+    /// already hold files the manifest knows nothing about: after Clear, a write into
+    /// the last destination would put a `_2` beside every file (review round 2, R6).
     static func check(_ c: Catalog, root: String) throws {
-        let r = URL(fileURLWithPath: root).standardizedFileURL.path + "/"
+        let known = c.scalarInt("SELECT COUNT(*) FROM output WHERE root = '\(root.replacingOccurrences(of: "'", with: "''"))';")
+        if known == 0, let names = try? FileManager.default.contentsOfDirectory(atPath: root),
+           names.contains(where: { !$0.hasPrefix(".") }) {
+            throw Refusal.notEmpty(root)
+        }
+        let r = root + "/"
         if let st = try? c.prepare("SELECT path FROM source;") {
             defer { st.finalize() }
             while st.step() {
-                let s = URL(fileURLWithPath: st.text(0) ?? "").standardizedFileURL.path + "/"
+                let s = canonicalRoot(st.text(0) ?? "") + "/"
                 if r.hasPrefix(s) { throw Refusal.insideSource(s) }
                 if s.hasPrefix(r) { throw Refusal.containsSource(s) }
             }
@@ -255,6 +280,8 @@ enum Act {
                   .bind(5, i.target).bind(6, root).done(); st.reset()
             }
             st.finalize()
+            // the content the row is about, so a rescan can find its file again
+            try c.run("UPDATE output SET source_sha = (SELECT sha256 FROM file WHERE file.id = output.file_id) WHERE source_sha IS NULL;")
         }
     }
 
@@ -266,11 +293,41 @@ enum Act {
     /// file id now points at a different path — ids are reused after Clear — is
     /// dropped outright (review finding 4).
     static func retire(_ c: Catalog, root: String) {
-        try? c.transaction {
-            try c.run("""
-                DELETE FROM output WHERE NOT EXISTS
-                    (SELECT 1 FROM file f WHERE f.id = output.file_id AND f.path = output.source);
-                """)
+        let fm = FileManager.default
+        // A row whose file id or path no longer matches — a rescan gave the file a new
+        // id, a source was renamed — is re-attached to the file that now carries the
+        // same content, so the copy already written stays accounted for. Only when no
+        // such file exists does the row go, and then its file goes with it if still
+        // as written (review round 2, R3).
+        var moved: [(Int, String?, String, String?)] = []
+        if let st = try? c.prepare("""
+            SELECT o.file_id, o.source_sha, o.target, o.written_sha FROM output o
+            WHERE o.root = ? AND NOT EXISTS (SELECT 1 FROM file f WHERE f.id = o.file_id AND f.path = o.source);
+            """) {
+            st.bind(1, root)
+            while st.step() { moved.append((st.int(0), st.text(1), st.text(2) ?? "", st.text(3))) }
+            st.finalize()
+        }
+        for (id, sha, target, written) in moved {
+            var newID: Int? = nil, newPath: String? = nil
+            if let sha, let st = try? c.prepare("""
+                SELECT f.id, f.path FROM file f WHERE f.sha256 = ?
+                  AND NOT EXISTS (SELECT 1 FROM output o WHERE o.file_id = f.id) ORDER BY f.id LIMIT 1;
+                """) {
+                st.bind(1, sha)
+                if st.step() { newID = st.int(0); newPath = st.text(1) }
+                st.finalize()
+            }
+            if let newID, let newPath {
+                try? c.transaction {
+                    let st = try c.prepare("UPDATE output SET file_id = ?, source = ? WHERE file_id = ?;")
+                    st.bind(1, newID).bind(2, newPath).bind(3, id).done(); st.finalize()
+                }
+            } else {
+                let path = (root as NSString).appendingPathComponent(target)
+                if let written, Extractor.shaOfFile(path) == written { try? fm.removeItem(atPath: path) }
+                try? c.transaction { let st = try c.prepare("DELETE FROM output WHERE file_id = ?;"); st.bind(1, id).done(); st.finalize() }
+            }
         }
         var stale: [(Int, String, String?)] = []
         if let st = try? c.prepare("""
@@ -282,7 +339,6 @@ enum Act {
             while st.step() { stale.append((st.int(0), st.text(1) ?? "", st.text(2))) }
             st.finalize()
         }
-        let fm = FileManager.default
         for (id, target, sha) in stale {
             let path = (root as NSString).appendingPathComponent(target)
             if let sha, Extractor.shaOfFile(path) == sha { try? fm.removeItem(atPath: path) }
@@ -324,7 +380,7 @@ enum Act {
                     progress: @escaping (Int, Int) -> Void = { _, _ in }) throws -> Report {
         // One spelling of the root — no trailing slash, no "..": relative paths are
         // cut from it, and the manifest compares it as text (review finding 22).
-        let root = URL(fileURLWithPath: givenRoot).standardizedFileURL.path
+        let root = canonicalRoot(givenRoot)
         try check(c, root: root)
         guard ExifTool.locate() != nil else { throw Refusal.noWriter }
         let (need, free) = space(c, root: root)
@@ -458,7 +514,8 @@ enum Act {
     /// Remove what was written — only files that are still exactly what was written.
     /// A file changed since (edited, re-tagged) is left alone and reported. The
     /// originals are never involved.
-    static func undo(_ c: Catalog, root: String, progress: (Int, Int) -> Void = { _, _ in }) -> UndoReport {
+    static func undo(_ c: Catalog, root givenRoot: String, progress: (Int, Int) -> Void = { _, _ in }) -> UndoReport {
+        let root = canonicalRoot(givenRoot)
         var r = UndoReport()
         var rows: [(Int, String, String?)] = []
         // `committing`: moved into place by a run that crashed before recording it
